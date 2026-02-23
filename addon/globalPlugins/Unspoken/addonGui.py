@@ -7,6 +7,23 @@ from gui import settingsDialogs, guiHelper, NVDASettingsDialog
 class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 	title = "Unspoken"
 
+	def _add_labeled_slider(self, helper, label, conf_key):
+		"""Add a labeled slider bound to onReverbSettingChanged; return the slider."""
+		helper.addItem(wx.StaticText(self, label=label))
+		slider = helper.addItem(
+			wx.Slider(self, value=config.conf["unspoken"][conf_key], minValue=0, maxValue=100)
+		)
+		slider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
+		return slider
+
+	def _add_reverb_sliders(self, helper):
+		"""Add EFX reverb parameter sliders to the settings panel."""
+		self.RoomSizeSlider = self._add_labeled_slider(helper, "Room Size (0-100)", "RoomSize")
+		self.DampingSlider = self._add_labeled_slider(helper, "Damping (0-100)", "Damping")
+		self.WetLevelSlider = self._add_labeled_slider(helper, "Wet Level (0-100)", "WetLevel")
+		self.DryLevelSlider = self._add_labeled_slider(helper, "Dry Level (0-100)", "DryLevel")
+		self.WidthSlider = self._add_labeled_slider(helper, "Width (0-100)", "Width")
+
 	def makeSettings(self, settingsSizer):
 		settingsSizer = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		self.sayAllCheckBox = settingsSizer.addItem(
@@ -29,65 +46,7 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 		self.ReverbCheckBox.SetValue(config.conf["unspoken"]["Reverb"])
 		self.ReverbCheckBox.Bind(wx.EVT_CHECKBOX, self.onReverbSettingChanged)
 
-		# EFX reverb settings
-		self.RoomSizeSliderLabel = settingsSizer.addItem(
-			wx.StaticText(self, label="Room Size (0-100)")
-		)
-		self.RoomSizeSlider = settingsSizer.addItem(
-			wx.Slider(
-				self,
-				value=config.conf["unspoken"]["RoomSize"],
-				minValue=0,
-				maxValue=100,
-			)
-		)
-		self.RoomSizeSlider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
-
-		self.DampingSliderLabel = settingsSizer.addItem(
-			wx.StaticText(self, label="Damping (0-100)")
-		)
-		self.DampingSlider = settingsSizer.addItem(
-			wx.Slider(
-				self, value=config.conf["unspoken"]["Damping"], minValue=0, maxValue=100
-			)
-		)
-		self.DampingSlider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
-
-		self.WetLevelSliderLabel = settingsSizer.addItem(
-			wx.StaticText(self, label="Wet Level (0-100)")
-		)
-		self.WetLevelSlider = settingsSizer.addItem(
-			wx.Slider(
-				self,
-				value=config.conf["unspoken"]["WetLevel"],
-				minValue=0,
-				maxValue=100,
-			)
-		)
-		self.WetLevelSlider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
-
-		self.DryLevelSliderLabel = settingsSizer.addItem(
-			wx.StaticText(self, label="Dry Level (0-100)")
-		)
-		self.DryLevelSlider = settingsSizer.addItem(
-			wx.Slider(
-				self,
-				value=config.conf["unspoken"]["DryLevel"],
-				minValue=0,
-				maxValue=100,
-			)
-		)
-		self.DryLevelSlider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
-
-		self.WidthSliderLabel = settingsSizer.addItem(
-			wx.StaticText(self, label="Width (0-100)")
-		)
-		self.WidthSlider = settingsSizer.addItem(
-			wx.Slider(
-				self, value=config.conf["unspoken"]["Width"], minValue=0, maxValue=100
-			)
-		)
-		self.WidthSlider.Bind(wx.EVT_SLIDER, self.onReverbSettingChanged)
+		self._add_reverb_sliders(settingsSizer)
 
 		self.noSoundsCheckBox = settingsSizer.addItem(
 			wx.CheckBox(self, label="&play sounds for roles (Enable Add-On)")

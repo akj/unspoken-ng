@@ -1,6 +1,6 @@
 # unspoken-ng
 
-Unspoken for modern NVDA, using SteamAudio and libverb
+Unspoken for modern NVDA, using OpenAL Soft for HRTF spatialization and EFX reverb.
 
 ## Why?
 
@@ -11,7 +11,9 @@ Unfortunately, previous versions of Unspoken had many serious problems due to th
 
 ## The Solution
 
-This version of Unspoken now uses a 3d audio library called SteamAudio.  SteamAudio is developed by Valve, the same people who make the Steam gaming store, and use it themselves in many popular video games. That means the library is battle tested, debugged, and maintained.  
+This version of Unspoken uses OpenAL Soft for HRTF spatialization and EFX reverb via a
+pure-Python ctypes wrapper. OpenAL Soft is an actively maintained, cross-platform OpenAL
+implementation with a permissive MIT license.
 
 ## Credits
 
@@ -24,18 +26,21 @@ In the case of this project, I'm really just the releaser, documenter, and conta
 
 ## Using the addon
 
-The addon, once installed, will create a new category under settings called "unspoken".  Here, you can turn the sounds on and off, change if NVDA will announce control types as well as play the sounds, and configure reverb settings.  
+The addon, once installed, will create a new category under settings called "unspoken".  Here, you can turn the sounds on and off, change if NVDA will announce control types as well as play the sounds, and configure reverb settings.
 
 ## Building
 
-If all you want to build is the NVDA addon, you can do so using scons.  If, however, you would like to make changes to the SteamAudio bindings, you will need the steam audio sdk, and the Microsoft Visual C++ compiler. Once you have these things, you can build the bindings and the addon by running build.bat.
+Build the NVDA addon using scons. No external C compiler or SDK is required; the audio
+backend is pure Python using ctypes.
+
+Place `soft_oal.dll` (OpenAL Soft official Windows x64 build, ~2MB, MIT license) in
+`addon/globalPlugins/Unspoken/` before building. Download from https://openal-soft.org/
 
 ## Known Issues
 
 If you would like to fix any of these issues, pull requests will be happily and gratefully accepted:
-1. Currently, unspoken-ng uses libverb for reverb, instead of SteamAudio. While SteamAudio supports reverb directly, it's poorly documented, and we couldn't get it to work.  
-2. No translation support: it's unclear to me what needs to happen here. I need to make some kind of cloud account for some sort of crowd service or something?
-3. Unspoken-ng does not play sounds while arrowing through some controls on the web.  This is because we can't get the position of a control until the focus moves to it, and NVDA no longer moves system focus with the browse cursor.  We should be able to fix this by copying parts of the way earcons does things. I just haven't gotten there yet.
+1. No translation support: it's unclear to me what needs to happen here. I need to make some kind of cloud account for some sort of crowd service or something?
+2. Unspoken-ng does not play sounds while arrowing through some controls on the web.  This is because we can't get the position of a control until the focus moves to it, and NVDA no longer moves system focus with the browse cursor.  We should be able to fix this by copying parts of the way earcons does things. I just haven't gotten there yet.
 
 ## Maintenance commitment
 
