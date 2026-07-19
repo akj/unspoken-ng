@@ -3,6 +3,7 @@
 # Updated to use Synthizer by Mason Armstrong (mason@masonasons.me)
 
 import atexit
+import json
 import os
 import os.path
 import sys
@@ -33,6 +34,20 @@ except ImportError as e:
     raise
 
 UNSPOKEN_ROOT_PATH = os.path.abspath(os.path.dirname(__file__))
+LATENCY_LOG_PATH = os.path.join(
+    os.path.expanduser("~"), "unspoken_latency.jsonl"
+)
+_latency_log_lock = threading.Lock()
+
+
+def _write_latency_record(record):
+    try:
+        line = json.dumps(record)
+        with _latency_log_lock:
+            with open(LATENCY_LOG_PATH, "a", encoding="utf-8") as log_file:
+                log_file.write(line + "\n")
+    except Exception:
+        pass
 
 
 # Sounds
@@ -226,11 +241,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _onNavigationTimer(self, event):
         """Timer to check navigator object changes without blocking"""
+        t_event = time.perf_counter_ns()
         try:
             current_nav = api.getNavigatorObject()
             if current_nav and current_nav != self._last_navigator_object:
                 self._last_navigator_object = current_nav
-                self._play_object_async(current_nav)
+                self._play_object_async(current_nav, t_event, "nav")
         except Exception:
             # Ignore any errors to avoid interrupting the timer
             pass
@@ -322,23 +338,40 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # Use cached volume (updated at init and when synth changes)
         return (role, angle_x, angle_y, self._cached_volume)
 
-    def _play_object_async(self, obj):
+    def _play_object_async(self, obj, t_event=None, source="?"):
         """Extract params and play sound in background thread."""
+        if t_event is None:
+            t_event = time.perf_counter_ns()
         params = self._extract_sound_params(obj)
+        t_extract = time.perf_counter_ns()
         if params is not None:
             role, angle_x, angle_y, volume = params
             self._sound_generation += 1
             my_generation = self._sound_generation
+            timing = {
+                "source": source,
+                "t_event": t_event,
+                "t_extract": t_extract,
+            }
 
             def play_async():
+                t_thread = time.perf_counter_ns()
+                timing["t_thread"] = t_thread
                 try:
-                    self._play_sound_async(role, angle_x, angle_y, volume, my_generation)
+                    self._play_sound_async(
+                        role,
+                        angle_x,
+                        angle_y,
+                        volume,
+                        my_generation,
+                        timing,
+                    )
                 except Exception:
                     pass
 
             threading.Thread(target=play_async, daemon=True).start()
 
-    def _play_sound_async(self, role, angle_x, angle_y, volume, generation):
+    def _play_sound_async(self, role, angle_x, angle_y, volume, generation, timing):
         """Process and play sound on background thread using pre-extracted parameters.
 
         Args:
@@ -347,54 +380,84 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 angle_y: Vertical angle in degrees (-90 to 90)
                 volume: Pre-computed volume multiplier
                 generation: Sound generation number for interrupt detection
+                timing: Timestamp record populated as playback progresses
         """
+        timing.update(
+            {
+                "role": str(role),
+                "reverb": config.conf["unspoken"]["Reverb"],
+                "generation": generation,
+                "n_input": 0,
+                "out_bytes": 0,
+                "dropped": None,
+                "t_volume": None,
+                "t_process": None,
+                "t_stop": None,
+                "t_feed": None,
+                "t_idle": None,
+            }
+        )
         if role not in sounds:
             return
 
         sound_data = sounds[role]
         audio_data = sound_data["data"]
+        timing["n_input"] = len(audio_data)
 
         # Adjust volume (pre-computed on main thread)
         adjusted_audio = [sample * volume for sample in audio_data]
+        timing["t_volume"] = time.perf_counter_ns()
 
         # Process with OpenAL for HRTF spatialization and reverb
         final_audio = self.audio_engine.process_sound(
             adjusted_audio, angle_x, angle_y
         )
+        timing["t_process"] = time.perf_counter_ns()
+        timing["out_bytes"] = len(final_audio) if final_audio else 0
         if not final_audio:
             log.warn("Failed processing %r", role)
             return
 
         # Exit early if this sound has been superseded by a newer request
         if generation != self._sound_generation:
+            timing["dropped"] = "superseded_prestop"
+            _write_latency_record(timing)
             return
 
         # Immediate interrupt - stop() is called WITHOUT lock to enable instant
         # interruption per NVDA WavePlayer design. Any thread can interrupt at
         # any time; the generation check above ensures only current sound stops.
         self.wave_player.stop()
+        timing["t_stop"] = time.perf_counter_ns()
 
         # Lock protects feed() from concurrent calls (WavePlayer requirement).
         # Second generation check catches threads that passed the pre-stop check
         # but queued at the lock while a newer sound was requested.
         with self._wave_player_lock:
             if generation != self._sound_generation:
+                timing["dropped"] = "superseded_postlock"
+                _write_latency_record(timing)
                 return
             self.wave_player.feed(final_audio)
+            timing["t_feed"] = time.perf_counter_ns()
             self.wave_player.idle()
+            timing["t_idle"] = time.perf_counter_ns()
+        _write_latency_record(timing)
 
     def event_gainFocus(self, obj, nextHandler):
+        t_event = time.perf_counter_ns()
         # Always call nextHandler first to avoid blocking navigation
         nextHandler()
-        self._play_object_async(obj)
+        self._play_object_async(obj, t_event, "focus")
 
     def event_mouseMove(self, obj, nextHandler, x, y):
+        t_event = time.perf_counter_ns()
         # Always call nextHandler first
         nextHandler()
 
         if obj != self._previous_mouse_object:
             self._previous_mouse_object = obj
-            self._play_object_async(obj)
+            self._play_object_async(obj, t_event, "mouse")
 
     def terminate(self):
         # Stop the timer
