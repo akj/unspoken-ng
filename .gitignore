@@ -11,3 +11,21 @@ addon/doc/en/
 *.zip
 .sconsign.dblite
 .vscode/
+
+# Agent tooling and process docs — kept local, not shipped with the addon
+.agents/
+.claude/
+docs/agents/
+skills-lock.json
+
+# Only the root CLAUDE.md is tracked, which points contributors at AGENTS.md.
+# Per-directory CLAUDE.md files are not wanted; this keeps any that agent
+# tooling regenerates from being committed.
+CLAUDE.md
+!/CLAUDE.md
+
+# Scratch working area (research notes, spikes, measurement runs)
+.scratch/
+
+# Build output from Rust spikes
+target/
