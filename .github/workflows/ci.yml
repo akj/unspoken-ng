@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pytest
+      - run: python -m pytest tests/
+
+  package:
+    name: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install scons markdown
+      - run: scons
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nvda-addon
+          path: "*.nvda-addon"
+          if-no-files-found: error

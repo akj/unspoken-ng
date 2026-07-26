@@ -1,6 +1,5 @@
 import enum
 import sys
-from pathlib import Path
 from types import ModuleType
 
 
@@ -58,8 +57,3 @@ Role = enum.IntEnum("Role", ROLE_NAMES)
 control_types_stub = ModuleType("controlTypes")
 control_types_stub.Role = Role
 sys.modules["controlTypes"] = control_types_stub
-
-UNSPOKEN_DIR = (
-    Path(__file__).resolve().parents[1] / "addon" / "globalPlugins" / "Unspoken"
-)
-sys.path.insert(0, str(UNSPOKEN_DIR))
