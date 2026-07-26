@@ -44,8 +44,11 @@ _SLOTS = (
     "treeviewitem",
 )
 _REFERENCE_RMS_DBFS = -20.0
-#: The seam's PCM width: mono 16-bit little-endian, whatever the asset was.
-_OUTPUT_SAMPLE_WIDTH = 2
+#: The seam's PCM format: mono 16-bit little-endian, whatever the asset was.
+#: The struct code is the single source of truth -- the width and the sample
+#: bounds are derived from it, so the packing and the clamping cannot desync.
+_OUTPUT_FORMAT_CHAR = "h"
+_OUTPUT_SAMPLE_WIDTH = struct.calcsize(f"<{_OUTPUT_FORMAT_CHAR}")
 _OUTPUT_FULL_SCALE = float(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
 _OUTPUT_MINIMUM = -(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
 _OUTPUT_MAXIMUM = (1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1)) - 1
@@ -474,7 +477,7 @@ def _process_theme(
 def _encode_samples(samples: list[int]) -> bytes:
     """Pack into the seam's one format: mono 16-bit little-endian PCM."""
 
-    return struct.pack(f"<{len(samples)}h", *samples)
+    return struct.pack(f"<{len(samples)}{_OUTPUT_FORMAT_CHAR}", *samples)
 
 
 def _load_default(default_path: Path | None) -> dict[str, tuple[bytes, int]]:

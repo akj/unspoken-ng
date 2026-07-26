@@ -24,10 +24,6 @@ def _encode_24_bit(samples):
     return bytes(encoded)
 
 
-def _encode_16_bit(samples):
-    return struct.pack(f"<{len(samples)}h", *samples)
-
-
 def _write_wav(path, samples, *, channels=1, sample_width=2, rate=22050):
     path.parent.mkdir(parents=True, exist_ok=True)
     if sample_width == 2:
@@ -315,20 +311,71 @@ def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
 
 
 def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
-    """The seam has one width, whatever mixture of assets a theme is made of."""
+    """The seam has one width, whatever mixture of assets a theme is made of.
+
+    Byte counts are the assertion, because they are what a width change moves:
+    a 24-bit slot that stayed 24-bit is 50% longer, and a stereo slot that was
+    not downmixed is twice as long. Anything weaker (an even length, a
+    round-trip through the same decoder) is true of any byte string at all.
+    """
     _, user = theme_roots
     mixed = user / "mixed-widths"
-    _write_wav(mixed / "button.wav", [-1000, 1000], sample_width=2, rate=44100)
-    _write_wav(mixed / "link.wav", [-1_000_000, 1_000_000], sample_width=3, rate=48000)
-    _write_wav(mixed / "tab.wav", [1000, 3000, -1000, -3000], channels=2, sample_width=2)
+    _write_wav(mixed / "button.wav", [-1000, 500, 1000], sample_width=2, rate=44100)
+    _write_wav(
+        mixed / "link.wav",
+        [-1_000_000, 500_000, 1_000_000, -500_000],
+        sample_width=3,
+        rate=48000,
+    )
+    # Six interleaved values: three stereo frames, so three mono samples.
+    _write_wav(
+        mixed / "tab.wav",
+        [1000, 3000, -1000, -3000, 2000, 4000],
+        channels=2,
+        sample_width=2,
+        rate=22050,
+    )
 
     loaded = themes.load("mixed-widths")
 
     assert {"button", "link", "tab"} <= set(loaded)
-    for slot, (frames, source_rate) in loaded.items():
-        assert len(frames) % 2 == 0, f"{slot} is not whole 16-bit frames"
-        assert frames == _encode_16_bit(_decode_pcm(frames, 2)), f"{slot} does not round-trip"
-        assert source_rate > 0
+    assert {slot: len(loaded[slot][0]) for slot in ("button", "link", "tab")} == {
+        "button": 3 * 2,  # 3 mono samples, was already 16-bit
+        "link": 4 * 2,  # 4 mono samples, was 24-bit: 12 bytes if unconverted
+        "tab": 3 * 2,  # 3 mono samples, was 6 stereo values
+    }
+    assert {slot: loaded[slot][1] for slot in ("button", "link", "tab")} == {
+        "button": 44100,
+        "link": 48000,
+        "tab": 22050,
+    }, "the true source rate still crosses the seam"
+
+
+def test_the_width_change_happens_after_the_gain_stage(theme_roots):
+    """Quiet 24-bit detail must survive normalization, not be quantized away.
+
+    The conversion is folded into the gain scale and applied once, at the end,
+    so the RMS pass sees the asset's full 24-bit resolution. Converting first
+    would round these samples to [-1, 0, 1, 0] before the gain ever ran: the
+    quiet samples would come out silent and the loud ones full of quantization
+    error. With this fixture the two orderings disagree -- correct gives
+    [-4396, 1465, 4396, -1465], keeping the 3:1 ratio the asset had; converting
+    early gives [-4634, 0, 4634, 0].
+    """
+    _, user = theme_roots
+    _write_wav(
+        user / "quiet-24-bit" / "button.wav",
+        [-300, 100, 300, -100],
+        sample_width=3,
+        rate=48000,
+    )
+
+    frames, _ = themes.load("quiet-24-bit")["button"]
+    samples = _decode_pcm(frames, 2)
+
+    assert samples == [-4396, 1465, 4396, -1465]
+    assert abs(samples[0]) == pytest.approx(3 * abs(samples[1]), rel=1e-3)
+    assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
 
 
 @pytest.mark.parametrize(
