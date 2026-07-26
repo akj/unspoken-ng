@@ -45,6 +45,18 @@ ROLE_NAMES = (
     "CHECKMENUITEM",
     "SPLITBUTTON",
     "UNKNOWN_TEST_ROLE",
+    # Roles that appear in the #32 reading-path fixture but are deliberately
+    # absent from roles.ROLE_TO_SLOT. They are stubbed so the fixture test can
+    # ask for them by name and get the real answer -- no slot, no sound --
+    # rather than an AttributeError that would look like the same thing.
+    "DOCUMENT",
+    "GROUPING",
+    "HEADING",
+    "LABEL",
+    "LANDMARK",
+    "LIST",
+    "PARAGRAPH",
+    "SECTION",
 )
 
 # The review flagged that NVDA deprecated the module-level ROLE_* aliases
