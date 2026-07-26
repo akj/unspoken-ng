@@ -1,3 +1,4 @@
+import logging
 import math
 from pathlib import Path
 import struct
@@ -57,6 +58,13 @@ def _rms_dbfs(samples, sample_width):
     full_scale = 1 << (sample_width * 8 - 1)
     rms = math.sqrt(sum((sample / full_scale) ** 2 for sample in samples) / len(samples))
     return 20 * math.log10(rms)
+
+
+@pytest.fixture(autouse=True)
+def reset_user_themes_dir():
+    themes.set_user_themes_dir(None)
+    yield
+    themes.set_user_themes_dir(None)
 
 
 @pytest.fixture
@@ -136,6 +144,24 @@ def test_rms_normalization_and_manifest_gain_clamp(
     )
 
 
+def test_manifest_gain_allows_trailing_inline_comment(theme_roots):
+    _, user = theme_roots
+    theme = user / "inline-comment"
+    _write_wav(theme / "button.wav", [-1000, 1000] * 8)
+    (theme / "theme.ini").write_text(
+        "[theme]\n"
+        "name = Inline Comment\n"
+        "gain = -2.5        ; optional dB offset, applied after auto normalization\n",
+        encoding="utf-8",
+    )
+
+    assert themes._read_manifest(theme).gain_db == -2.5
+
+    frames, _ = themes.load(theme.name)["button"]
+    samples = _decode_pcm(frames, 2)
+    assert _rms_dbfs(samples, 2) == pytest.approx(-22.5, abs=0.01)
+
+
 def test_malformed_wavs_are_rejected_and_fall_back(theme_roots):
     bundled, user = theme_roots
     default = bundled / "default"
@@ -155,22 +181,45 @@ def test_malformed_wavs_are_rejected_and_fall_back(theme_roots):
     assert "broken" in {info.id for info in themes.discover()}
 
 
-def test_bad_manifest_falls_back_to_folder_metadata(theme_roots):
+@pytest.mark.parametrize("bad_gain", ["loud", "nan"])
+def test_bad_manifest_gain_preserves_valid_metadata(theme_roots, bad_gain):
     _, user = theme_roots
-    theme = user / "bad-manifest"
+    theme = user / f"bad-manifest-{bad_gain}"
     _write_wav(theme / "button.wav", [-1000, 1000])
     (theme / "theme.ini").write_text(
-        "[theme]\nname = Should Not Be Used\nauthor = Nobody\ngain = loud\n",
+        "[theme]\n"
+        "name = Preserved Name\n"
+        "author = Somebody\n"
+        "description = Still valid\n"
+        f"gain = {bad_gain}\n",
         encoding="utf-8",
     )
 
     info = next(info for info in themes.discover() if info.id == theme.name)
     result = themes.load(theme.name)
 
+    assert info.name == "Preserved Name"
+    assert info.author == "Somebody"
+    assert info.description == "Still valid"
+    assert "button" in result
+    samples = _decode_pcm(result["button"][0], 2)
+    assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
+
+
+def test_structurally_bad_manifest_falls_back_to_folder_metadata(theme_roots):
+    _, user = theme_roots
+    theme = user / "broken-ini"
+    _write_wav(theme / "button.wav", [-1000, 1000])
+    (theme / "theme.ini").write_text(
+        "[theme\nname = Should Not Be Used\n",
+        encoding="utf-8",
+    )
+
+    info = next(info for info in themes.discover() if info.id == theme.name)
+
     assert info.name == theme.name
     assert info.author is None
     assert info.description is None
-    assert "button" in result
 
 
 def test_discover_creates_user_dir_drops_empty_and_prefers_user(theme_roots):
@@ -202,6 +251,33 @@ def test_discover_creates_user_dir_drops_empty_and_prefers_user(theme_roots):
     assert result["shared"].path == user / "shared"
 
 
+def test_discover_uses_bundled_collision_when_user_theme_is_unusable(theme_roots):
+    bundled, user = theme_roots
+    bundled_default = bundled / "default"
+    _write_wav(bundled_default / "button.wav", [-1000, 1000])
+    (user / "default").mkdir(parents=True)
+
+    result = {info.id: info for info in themes.discover()}
+
+    assert result["default"].path == bundled_default
+    assert "button" in themes.load("default")
+
+
+def test_discover_checks_wav_headers_without_reading_frames(
+    theme_roots,
+    monkeypatch,
+):
+    bundled, _ = theme_roots
+    _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
+
+    def fail_if_called(self, frame_count):
+        raise AssertionError("discover() must not read WAV frames")
+
+    monkeypatch.setattr(wave.Wave_read, "readframes", fail_if_called)
+
+    assert [info.id for info in themes.discover()] == ["default"]
+
+
 def test_24_bit_pcm_is_preserved(theme_roots):
     _, user = theme_roots
     _write_wav(
@@ -217,6 +293,105 @@ def test_24_bit_pcm_is_preserved(theme_roots):
     assert source_rate == 48000
     assert len(frames) == len(samples) * 3
     assert _rms_dbfs(samples, 3) == pytest.approx(-20.0, abs=0.001)
+
+
+@pytest.mark.parametrize(
+    ("encoded", "expected"),
+    [
+        (b"", 0),
+        (b"\x01", 1),
+        (b"\x40\xe2\x01", 123456),
+        (b"\xff\xff\x7f", 8388607),
+        (b"\x00\x00\x80", -8388608),
+        (b"\xff\xff\xff", -1),
+    ],
+)
+def test_decode_24_bit_sample_vectors(encoded, expected):
+    assert themes._decode_24_bit(encoded) == expected
+
+
+def test_clipping_logs_one_warning_per_theme(caplog):
+    decoded = {
+        "button": themes._DecodedWav(
+            samples=[32767] + [0] * 999,
+            sample_width=2,
+            source_rate=22050,
+        ),
+        "link": themes._DecodedWav(
+            samples=[0] * 1000,
+            sample_width=2,
+            source_rate=22050,
+        ),
+    }
+
+    with caplog.at_level(logging.WARNING, logger=themes.__name__):
+        themes._process_theme(decoded, 0.0, "clipping-theme")
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert warnings == [
+        "Sound theme 'clipping-theme' clipped 1 samples; "
+        "peak overshoot 13.01 dB"
+    ]
+
+
+def test_processing_without_clipping_logs_no_warning(caplog):
+    decoded = {
+        "button": themes._DecodedWav(
+            samples=[-1000, 1000] * 8,
+            sample_width=2,
+            source_rate=22050,
+        ),
+    }
+
+    with caplog.at_level(logging.WARNING, logger=themes.__name__):
+        themes._process_theme(decoded, 0.0, "clean-theme")
+
+    assert not caplog.records
+
+
+def test_sparse_fallback_logs_only_slots_actually_loaded(theme_roots, caplog):
+    bundled, user = theme_roots
+    _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
+    _write_wav(user / "sparse" / "icon.wav", [-1000, 1000])
+
+    with caplog.at_level(logging.INFO, logger=themes.__name__):
+        themes.load("sparse")
+
+    fallback_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "falling back to default" in record.getMessage()
+    ]
+    assert fallback_messages == [
+        "Sound theme 'sparse' has no usable button slot; falling back to default"
+    ]
+
+
+def test_user_themes_dir_round_trip(tmp_path):
+    user_dir = tmp_path / "sound-themes"
+
+    themes.set_user_themes_dir(str(user_dir))
+    assert themes.get_user_themes_dir() == user_dir
+
+    themes.set_user_themes_dir(None)
+    assert themes.get_user_themes_dir() is None
+
+
+def test_discover_and_load_work_without_configured_user_dir(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled" / "sound-themes"
+    _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
+    monkeypatch.setattr(themes, "_BUNDLED_THEMES_DIR", bundled)
+
+    discovered = themes.discover()
+    loaded = themes.load("default")
+
+    assert [info.id for info in discovered] == ["default"]
+    assert "button" in loaded
+    assert themes.get_user_themes_dir() is None
 
 
 def test_unknown_theme_returns_default(theme_roots):

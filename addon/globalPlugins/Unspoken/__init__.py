@@ -37,7 +37,7 @@ UNSPOKEN_ROOT_PATH = os.path.abspath(os.path.dirname(__file__))
 
 # Sounds
 
-UNSPOKEN_SOUNDS_PATH = os.path.join(UNSPOKEN_ROOT_PATH, "sounds")
+UNSPOKEN_SOUNDS_PATH = os.path.join(UNSPOKEN_ROOT_PATH, "sound-themes", "default")
 
 # Associate object roles to sounds.
 sound_files = {

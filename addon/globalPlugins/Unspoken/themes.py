@@ -82,14 +82,14 @@ def discover() -> list[ThemeInfo]:
     """Return usable bundled and configured user themes, sorted by ID.
 
     Discovery is best-effort and never raises. A configured user directory is
-    created on first discovery. When IDs collide, the user folder is the sole
-    candidate and therefore wins even if it later proves unusable.
+    created on first discovery. When IDs collide, a usable user folder wins;
+    otherwise discovery falls back to the bundled folder with the same ID.
     """
 
     try:
-        candidates: dict[str, Path] = {}
+        candidates: dict[str, list[Path]] = {}
         for path in _theme_directories(_BUNDLED_THEMES_DIR):
-            candidates[path.name] = path
+            candidates[path.name] = [path]
 
         user_dir = _user_themes_dir
         if user_dir is not None:
@@ -103,30 +103,31 @@ def discover() -> list[ThemeInfo]:
                 )
             else:
                 for path in _theme_directories(user_dir):
-                    candidates[path.name] = path
+                    candidates.setdefault(path.name, []).insert(0, path)
 
         discovered = []
         for theme_id in sorted(candidates):
-            path = candidates[theme_id]
-            try:
-                manifest = _read_manifest(path)
-                if not _read_theme_wavs(path):
-                    continue
-                discovered.append(
-                    ThemeInfo(
-                        id=theme_id,
-                        name=manifest.name,
-                        path=path,
-                        author=manifest.author,
-                        description=manifest.description,
+            for path in candidates[theme_id]:
+                try:
+                    manifest = _read_manifest(path)
+                    if not _theme_has_usable_slot(path):
+                        continue
+                    discovered.append(
+                        ThemeInfo(
+                            id=theme_id,
+                            name=manifest.name,
+                            path=path,
+                            author=manifest.author,
+                            description=manifest.description,
+                        )
                     )
-                )
-            except Exception:
-                log.warning(
-                    "Skipping malformed sound theme folder %s",
-                    path,
-                    exc_info=True,
-                )
+                    break
+                except Exception:
+                    log.warning(
+                        "Skipping malformed sound theme folder %s",
+                        path,
+                        exc_info=True,
+                    )
         return discovered
     except Exception:
         log.warning("Sound theme discovery failed", exc_info=True)
@@ -156,12 +157,12 @@ def load(theme_id: str) -> dict[str, tuple[bytes, int]]:
         for slot in _SLOTS:
             if slot in requested:
                 continue
-            log.info(
-                "Sound theme %r has no usable %s slot; falling back to default",
-                theme_id,
-                slot,
-            )
             if slot in default:
+                log.info(
+                    "Sound theme %r has no usable %s slot; falling back to default",
+                    theme_id,
+                    slot,
+                )
                 merged[slot] = default[slot]
         return merged
     except Exception:
@@ -215,22 +216,11 @@ def _read_manifest(theme_path: Path) -> _Manifest:
     try:
         if not manifest_path.is_file():
             return fallback
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
         with manifest_path.open("r", encoding="utf-8") as manifest_file:
             parser.read_file(manifest_file)
         if not parser.has_section("theme"):
             raise configparser.Error("missing [theme] section")
-
-        section = parser["theme"]
-        gain_db = float(section.get("gain", "0"))
-        if not math.isfinite(gain_db):
-            raise ValueError("gain must be finite")
-        return _Manifest(
-            name=section.get("name", theme_path.name).strip() or theme_path.name,
-            author=section.get("author", "").strip() or None,
-            description=section.get("description", "").strip() or None,
-            gain_db=gain_db,
-        )
     except Exception:
         log.warning(
             "Ignoring malformed sound theme manifest %s",
@@ -238,6 +228,75 @@ def _read_manifest(theme_path: Path) -> _Manifest:
             exc_info=True,
         )
         return fallback
+
+    section = parser["theme"]
+
+    def read_text(key: str, default: str) -> str:
+        try:
+            return section.get(key, default).strip()
+        except Exception:
+            log.warning(
+                "Ignoring invalid %s field in sound theme manifest %s",
+                key,
+                manifest_path,
+                exc_info=True,
+            )
+            return default
+
+    try:
+        gain_db = float(section.get("gain", "0"))
+        if not math.isfinite(gain_db):
+            raise ValueError("gain must be finite")
+    except Exception:
+        log.warning(
+            "Ignoring invalid gain field in sound theme manifest %s",
+            manifest_path,
+            exc_info=True,
+        )
+        gain_db = 0.0
+
+    return _Manifest(
+        name=read_text("name", theme_path.name) or theme_path.name,
+        author=read_text("author", "") or None,
+        description=read_text("description", "") or None,
+        gain_db=gain_db,
+    )
+
+
+def _theme_has_usable_slot(theme_path: Path) -> bool:
+    for slot in _SLOTS:
+        wav_path = theme_path / f"{slot}.wav"
+        try:
+            exists = wav_path.is_file()
+        except Exception:
+            log.warning("Could not inspect sound theme file %s", wav_path, exc_info=True)
+            continue
+        if exists and _has_usable_wav_header(wav_path):
+            return True
+    return False
+
+
+def _has_usable_wav_header(path: Path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            source_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            if wav_file.getcomptype() != "NONE":
+                raise ValueError("compressed WAV data is not supported")
+            if channels not in (1, 2):
+                raise ValueError(f"unsupported channel count: {channels}")
+            if sample_width not in (2, 3):
+                raise ValueError(f"unsupported sample width: {sample_width}")
+            if source_rate <= 0:
+                raise ValueError(f"invalid sample rate: {source_rate}")
+            if frame_count <= 0:
+                raise ValueError("WAV contains no audio frames")
+        return True
+    except Exception:
+        log.warning("Rejecting malformed sound theme WAV %s", path, exc_info=True)
+        return False
 
 
 def _read_theme_wavs(theme_path: Path) -> dict[str, _DecodedWav]:
@@ -304,10 +363,7 @@ def _decode_wav(path: Path) -> _DecodedWav | None:
 
 
 def _decode_24_bit(sample: bytes) -> int:
-    value = sample[0] | (sample[1] << 8) | (sample[2] << 16)
-    if value & 0x800000:
-        value -= 1 << 24
-    return value
+    return int.from_bytes(sample, byteorder="little", signed=True)
 
 
 def _average_samples(left: int, right: int) -> int:
@@ -361,19 +417,36 @@ def _process_theme(
         gain_factor = 1.0
 
     processed = {}
+    clipped_sample_count = 0
+    peak_overshoot_ratio = 1.0
     for slot, wav in decoded.items():
         bits = wav.sample_width * 8
         minimum = -(1 << (bits - 1))
         maximum = (1 << (bits - 1)) - 1
+        full_scale = float(1 << (bits - 1))
         # Scale in floating point and clamp only at final quantization, avoiding
         # intermediate integer overflow or repeated clipping.
-        samples = [
-            max(minimum, min(maximum, round(sample * gain_factor)))
-            for sample in wav.samples
-        ]
+        samples = []
+        for sample in wav.samples:
+            scaled = sample * gain_factor
+            if scaled < minimum or scaled > maximum:
+                clipped_sample_count += 1
+                peak_overshoot_ratio = max(
+                    peak_overshoot_ratio,
+                    abs(scaled) / full_scale,
+                )
+            samples.append(max(minimum, min(maximum, round(scaled))))
         processed[slot] = (
             _encode_samples(samples, wav.sample_width),
             wav.source_rate,
+        )
+    if clipped_sample_count:
+        peak_overshoot_db = 20.0 * math.log10(peak_overshoot_ratio)
+        log.warning(
+            "Sound theme %r clipped %d samples; peak overshoot %.2f dB",
+            theme_id,
+            clipped_sample_count,
+            peak_overshoot_db,
         )
     return processed
 
