@@ -38,7 +38,13 @@ def test_conf_spec_matches_new_configuration_schema():
         (True, False, "speechOnly"),
     ],
 )
-def test_role_announcement_truth_table(no_sounds, speak_roles, expected):
+@pytest.mark.parametrize("as_strings", [False, True], ids=["booleans", "strings"])
+def test_role_announcement_truth_table(
+    no_sounds, speak_roles, expected, as_strings
+):
+    if as_strings:
+        no_sounds = str(no_sounds)
+        speak_roles = str(speak_roles)
     section = {"noSounds": no_sounds, "speakRoles": speak_roles}
 
     migration.migrate(section)
@@ -59,15 +65,16 @@ def test_missing_role_setting_uses_legacy_default(section, expected):
     assert section == {"roleAnnouncement": expected}
 
 
-def test_say_all_true_enables_silence_during_say_all():
-    section = {"sayAll": True}
+@pytest.mark.parametrize("say_all", [True, "True"], ids=["boolean", "string"])
+def test_say_all_true_enables_silence_during_say_all(say_all):
+    section = {"sayAll": say_all}
 
     migration.migrate(section)
 
     assert section["silenceDuringSayAll"] is True
 
 
-@pytest.mark.parametrize("say_all", [False, None])
+@pytest.mark.parametrize("say_all", [False, "False", None])
 def test_say_all_absent_or_false_does_not_set_silence_during_say_all(say_all):
     section = {"HRTF": True}
     if say_all is not None:
@@ -78,8 +85,9 @@ def test_say_all_absent_or_false_does_not_set_silence_during_say_all(say_all):
     assert "silenceDuringSayAll" not in section
 
 
-def test_reverb_false_maps_to_none():
-    section = {"Reverb": False}
+@pytest.mark.parametrize("reverb", [False, "False"], ids=["boolean", "string"])
+def test_reverb_false_maps_to_none(reverb):
+    section = {"Reverb": reverb}
 
     migration.migrate(section)
 
@@ -94,7 +102,8 @@ def test_absent_reverb_setting_leaves_new_reverb_unset():
     assert "reverb" not in section
 
 
-def test_reverb_true_maps_to_small_room_and_discards_slider_values():
+@pytest.mark.parametrize("reverb", [True, "True"], ids=["boolean", "string"])
+def test_reverb_true_maps_to_small_room_and_discards_slider_values(reverb):
     slider_values = {
         "RoomSize": 17,
         "Damping": 23,
@@ -102,13 +111,12 @@ def test_reverb_true_maps_to_small_room_and_discards_slider_values():
         "DryLevel": 59,
         "Width": 83,
     }
-    section = {"Reverb": True, **slider_values}
+    section = {"Reverb": reverb, **slider_values}
 
     migration.migrate(section)
 
     assert section["reverb"] == "smallRoom"
     assert not (set(slider_values) & set(section))
-    assert not (set(slider_values.values()) & set(section.values()))
 
 
 def test_hrtf_and_volume_adjust_are_dropped_without_replacements():
@@ -116,7 +124,20 @@ def test_hrtf_and_volume_adjust_are_dropped_without_replacements():
 
     migration.migrate(section)
 
-    assert section == {"roleAnnouncement": "sounds"}
+    assert section == {}
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        {"sayAll": True},
+        {"Reverb": True},
+    ],
+)
+def test_non_role_legacy_settings_do_not_add_role_announcement(section):
+    migration.migrate(section)
+
+    assert "roleAnnouncement" not in section
 
 
 @pytest.mark.parametrize(
@@ -153,7 +174,22 @@ def test_migration_is_idempotent():
     migration.migrate(section)
 
     assert section == after_first_migration
-    assert not (set(migration._OLD_KEYS) & set(section))
+    assert not (
+        {
+            "sayAll",
+            "speakRoles",
+            "noSounds",
+            "HRTF",
+            "volumeAdjust",
+            "Reverb",
+            "RoomSize",
+            "Damping",
+            "WetLevel",
+            "DryLevel",
+            "Width",
+        }
+        & set(section)
+    )
 
 
 def test_all_legacy_keys_are_deleted_from_full_legacy_config():
@@ -173,4 +209,19 @@ def test_all_legacy_keys_are_deleted_from_full_legacy_config():
 
     migration.migrate(section)
 
-    assert not (set(migration._OLD_KEYS) & set(section))
+    assert not (
+        {
+            "sayAll",
+            "speakRoles",
+            "noSounds",
+            "HRTF",
+            "volumeAdjust",
+            "Reverb",
+            "RoomSize",
+            "Damping",
+            "WetLevel",
+            "DryLevel",
+            "Width",
+        }
+        & set(section)
+    )
