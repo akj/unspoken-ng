@@ -45,4 +45,7 @@ i18nSources = pythonSources + ["buildVars.py", "docHandler.py"]
 
 # Files that will be ignored when building the nvda-addon file
 # Paths are relative to the addon directory, not to the root directory of your addon sources.
-excludedFiles = []
+excludedFiles = [
+	# Add exact addon-relative paths here. Python bytecode and all files inside
+	# __pycache__ directories are excluded unconditionally by sconstruct.
+]

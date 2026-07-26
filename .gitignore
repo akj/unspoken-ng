@@ -3,6 +3,7 @@ addon/doc/en/
 *_docHandler.py
 *.html
 *.ini
+!/pytest.ini
 *.mo
 *.pot
 *.pyc
