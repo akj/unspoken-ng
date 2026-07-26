@@ -495,22 +495,3 @@ def test_cancel_stops_a_late_selection_event_from_reapplying(addon_gui):
 	evt_choice = addon_gui._test_wx.EVT_CHOICE
 	assert evt_choice not in panel.themeChoice.handlers
 	assert evt_choice not in panel.reverbChoice.handlers
-
-
-# --- the temporary config-spec bridge (#38) -------------------------------
-
-
-def test_bridge_registers_the_config_spec_when_it_is_missing():
-	conf = _Conf(_default_conf())
-
-	with _addon_gui(conf) as module:
-		migration = importlib.import_module(f"{module.__package__}.migration")
-		assert conf.spec["unspoken"] == migration.CONF_SPEC
-
-
-def test_bridge_leaves_an_already_registered_spec_alone():
-	already_registered = {"theme": 'string(default="marimba")'}
-	conf = _Conf(_default_conf(), spec={"unspoken": already_registered})
-
-	with _addon_gui(conf):
-		assert conf.spec["unspoken"] is already_registered

@@ -24,25 +24,13 @@ def _apply_reverb_noop(preset):
 # until then they are no-ops, which keeps this module importable and testable
 # off NVDA.
 #
-# Contract for #38: both hooks are called on NVDA's main thread, once per
-# selection change — that is, once per arrow keypress while the user moves
+# Contract, honoured by #38: both hooks are called on NVDA's main thread, once
+# per selection change — that is, once per arrow keypress while the user moves
 # through a combo box. Neither may block: decoding a sound theme belongs on the
-# Sound Player's worker, not here.
+# Sound Player's worker, not here. GlobalPlugin debounces the theme hook for
+# exactly that reason.
 apply_theme: Callable[[str], None] = _apply_theme_noop
 apply_reverb: Callable[[str], None] = _apply_reverb_noop
-
-
-# TODO(#38): temporary config bridge. GlobalPlugin is the designed home for
-# CONF_SPEC registration; delete this whole block once #38 lands. The guard
-# keeps the bridge from fighting a spec #38 has already registered.
-try:
-	from . import migration
-
-	if "theme" not in config.conf.spec.get("unspoken", {}):
-		config.conf.spec["unspoken"] = migration.CONF_SPEC
-except Exception:
-	# A partial config stub or an older NVDA config object must not break import.
-	pass
 
 
 ROLE_ANNOUNCEMENT_CHOICES = (
@@ -248,8 +236,8 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 		"""Snapshot the four settings, tolerating a config spec not yet registered.
 
 		Keys that are missing are simply absent from the snapshot; the choice
-		helpers then fall back to the spec §8 defaults, so a panel that opens
-		before #38 registers CONF_SPEC still builds.
+		helpers then fall back to the spec §8 defaults, so the panel still
+		builds if `GlobalPlugin` never got as far as registering the spec.
 		"""
 
 		snapshot = {}
