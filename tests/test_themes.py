@@ -278,7 +278,14 @@ def test_discover_checks_wav_headers_without_reading_frames(
     assert [info.id for info in themes.discover()] == ["default"]
 
 
-def test_24_bit_pcm_is_preserved(theme_roots):
+def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
+    """A 24-bit asset must cross the seam as 16-bit, scaled, not reinterpreted.
+
+    Core OpenAL has no 24-bit format: 3-byte frames handed to the Sound Player
+    are uploaded as `AL_FORMAT_MONO16` and rendered as full-scale noise, and
+    nothing reports an error. The conversion belongs here, after the gain
+    stage, so the RMS pass still sees the asset's full resolution.
+    """
     _, user = theme_roots
     _write_wav(
         user / "twenty-four-bit" / "button.wav",
@@ -288,11 +295,87 @@ def test_24_bit_pcm_is_preserved(theme_roots):
     )
 
     frames, source_rate = themes.load("twenty-four-bit")["button"]
-    samples = _decode_pcm(frames, 3)
+    samples = _decode_pcm(frames, 2)
 
-    assert source_rate == 48000
-    assert len(frames) == len(samples) * 3
-    assert _rms_dbfs(samples, 3) == pytest.approx(-20.0, abs=0.001)
+    assert source_rate == 48000, "the true rate still crosses the seam"
+    assert len(frames) == len(samples) * 2, "two bytes per sample, not three"
+    assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
+    assert max(abs(sample) for sample in samples) <= 32767
+    # Normalized RMS of the input is 0.094243, so the theme gain is
+    # 0.1 / 0.094243 = 1.061079; the width change divides by 2**8.
+    # 1_000_000 * 1.061079 / 256 = 4144.84 -> 4145.
+    assert samples == [-4145, 2072, 4145, -2072]
+    # Intra-theme dynamics survive: the quiet samples stay half the loud ones.
+    assert samples[0] == -samples[2]
+    assert abs(samples[0]) == pytest.approx(2 * abs(samples[1]), rel=1e-3)
+
+
+def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
+    """The seam has one width, whatever mixture of assets a theme is made of.
+
+    Byte counts are the assertion, because they are what a width change moves:
+    a 24-bit slot that stayed 24-bit is 50% longer, and a stereo slot that was
+    not downmixed is twice as long. Anything weaker (an even length, a
+    round-trip through the same decoder) is true of any byte string at all.
+    """
+    _, user = theme_roots
+    mixed = user / "mixed-widths"
+    _write_wav(mixed / "button.wav", [-1000, 500, 1000], sample_width=2, rate=44100)
+    _write_wav(
+        mixed / "link.wav",
+        [-1_000_000, 500_000, 1_000_000, -500_000],
+        sample_width=3,
+        rate=48000,
+    )
+    # Six interleaved values: three stereo frames, so three mono samples.
+    _write_wav(
+        mixed / "tab.wav",
+        [1000, 3000, -1000, -3000, 2000, 4000],
+        channels=2,
+        sample_width=2,
+        rate=22050,
+    )
+
+    loaded = themes.load("mixed-widths")
+
+    assert {"button", "link", "tab"} <= set(loaded)
+    assert {slot: len(loaded[slot][0]) for slot in ("button", "link", "tab")} == {
+        "button": 3 * 2,  # 3 mono samples, was already 16-bit
+        "link": 4 * 2,  # 4 mono samples, was 24-bit: 12 bytes if unconverted
+        "tab": 3 * 2,  # 3 mono samples, was 6 stereo values
+    }
+    assert {slot: loaded[slot][1] for slot in ("button", "link", "tab")} == {
+        "button": 44100,
+        "link": 48000,
+        "tab": 22050,
+    }, "the true source rate still crosses the seam"
+
+
+def test_the_width_change_happens_after_the_gain_stage(theme_roots):
+    """Quiet 24-bit detail must survive normalization, not be quantized away.
+
+    The conversion is folded into the gain scale and applied once, at the end,
+    so the RMS pass sees the asset's full 24-bit resolution. Converting first
+    would round these samples to [-1, 0, 1, 0] before the gain ever ran: the
+    quiet samples would come out silent and the loud ones full of quantization
+    error. With this fixture the two orderings disagree -- correct gives
+    [-4396, 1465, 4396, -1465], keeping the 3:1 ratio the asset had; converting
+    early gives [-4634, 0, 4634, 0].
+    """
+    _, user = theme_roots
+    _write_wav(
+        user / "quiet-24-bit" / "button.wav",
+        [-300, 100, 300, -100],
+        sample_width=3,
+        rate=48000,
+    )
+
+    frames, _ = themes.load("quiet-24-bit")["button"]
+    samples = _decode_pcm(frames, 2)
+
+    assert samples == [-4396, 1465, 4396, -1465]
+    assert abs(samples[0]) == pytest.approx(3 * abs(samples[1]), rel=1e-3)
+    assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
 
 
 @pytest.mark.parametrize(

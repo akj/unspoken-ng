@@ -1,4 +1,17 @@
-"""Discover and decode Unspoken sound themes without depending on NVDA."""
+"""Discover and decode Unspoken sound themes without depending on NVDA.
+
+`load()` returns what crosses the Sound Player seam: `slot -> (frames,
+source_rate)`, where **frames are always mono 16-bit little-endian PCM** and
+`source_rate` is whatever the file really was (spec §4.3 -- resampling happens
+below the seam, per source, in OpenAL).
+
+The width is part of the seam, not a detail of this module. Core OpenAL has no
+24-bit buffer format, so 24-bit frames handed across would be uploaded as
+`AL_FORMAT_MONO16` and rendered as full-scale broadband noise -- with no error
+reported by anything, into the headphones of a user who cannot see what
+happened. Assets may be 16- or 24-bit (spec §7); this module is where that
+stops being true.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +44,14 @@ _SLOTS = (
     "treeviewitem",
 )
 _REFERENCE_RMS_DBFS = -20.0
+#: The seam's PCM format: mono 16-bit little-endian, whatever the asset was.
+#: The struct code is the single source of truth -- the width and the sample
+#: bounds are derived from it, so the packing and the clamping cannot desync.
+_OUTPUT_FORMAT_CHAR = "h"
+_OUTPUT_SAMPLE_WIDTH = struct.calcsize(f"<{_OUTPUT_FORMAT_CHAR}")
+_OUTPUT_FULL_SCALE = float(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
+_OUTPUT_MINIMUM = -(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
+_OUTPUT_MAXIMUM = (1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1)) - 1
 _BUNDLED_THEMES_DIR = Path(__file__).resolve().parent / "sound-themes"
 _user_themes_dir: Path | None = None
 
@@ -135,7 +156,11 @@ def discover() -> list[ThemeInfo]:
 
 
 def load(theme_id: str) -> dict[str, tuple[bytes, int]]:
-    """Load a sound theme, filling sparse slots from the bundled default."""
+    """Load a sound theme, filling sparse slots from the bundled default.
+
+    Returns `slot -> (mono 16-bit little-endian PCM frames, source_rate)` --
+    the seam's format for every slot, whatever width the asset was authored at.
+    """
 
     try:
         requested_path = _find_requested_theme(theme_id)
@@ -420,26 +445,24 @@ def _process_theme(
     clipped_sample_count = 0
     peak_overshoot_ratio = 1.0
     for slot, wav in decoded.items():
-        bits = wav.sample_width * 8
-        minimum = -(1 << (bits - 1))
-        maximum = (1 << (bits - 1)) - 1
-        full_scale = float(1 << (bits - 1))
-        # Scale in floating point and clamp only at final quantization, avoiding
-        # intermediate integer overflow or repeated clipping.
+        source_full_scale = float(1 << (wav.sample_width * 8 - 1))
+        # One conversion, at the end: the theme gain and the width change are a
+        # single floating-point scale, so a 24-bit asset keeps its full
+        # resolution through the RMS pass above and is quantized exactly once.
+        # Clamping happens only here, so there is no intermediate overflow and
+        # nothing clips twice.
+        scale = gain_factor * _OUTPUT_FULL_SCALE / source_full_scale
         samples = []
         for sample in wav.samples:
-            scaled = sample * gain_factor
-            if scaled < minimum or scaled > maximum:
+            scaled = sample * scale
+            if scaled < _OUTPUT_MINIMUM or scaled > _OUTPUT_MAXIMUM:
                 clipped_sample_count += 1
                 peak_overshoot_ratio = max(
                     peak_overshoot_ratio,
-                    abs(scaled) / full_scale,
+                    abs(scaled) / _OUTPUT_FULL_SCALE,
                 )
-            samples.append(max(minimum, min(maximum, round(scaled))))
-        processed[slot] = (
-            _encode_samples(samples, wav.sample_width),
-            wav.source_rate,
-        )
+            samples.append(max(_OUTPUT_MINIMUM, min(_OUTPUT_MAXIMUM, round(scaled))))
+        processed[slot] = (_encode_samples(samples), wav.source_rate)
     if clipped_sample_count:
         peak_overshoot_db = 20.0 * math.log10(peak_overshoot_ratio)
         log.warning(
@@ -451,22 +474,10 @@ def _process_theme(
     return processed
 
 
-def _encode_samples(samples: list[int], sample_width: int) -> bytes:
-    if sample_width == 2:
-        return struct.pack(f"<{len(samples)}h", *samples)
+def _encode_samples(samples: list[int]) -> bytes:
+    """Pack into the seam's one format: mono 16-bit little-endian PCM."""
 
-    encoded = bytearray()
-    for sample in samples:
-        if sample < 0:
-            sample += 1 << 24
-        encoded.extend(
-            (
-                sample & 0xFF,
-                (sample >> 8) & 0xFF,
-                (sample >> 16) & 0xFF,
-            )
-        )
-    return bytes(encoded)
+    return struct.pack(f"<{len(samples)}{_OUTPUT_FORMAT_CHAR}", *samples)
 
 
 def _load_default(default_path: Path | None) -> dict[str, tuple[bytes, int]]:
