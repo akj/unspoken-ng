@@ -108,14 +108,19 @@ class _NVDASettingsProvider:
     block: `output_device` is one ConfigObj lookup, and `volume` is two plus
     the arithmetic in `wiring.effective_volume`.
 
-    `volume` additionally reads the synth's volume, but only when the user has
-    turned on "sound volume follows voice" -- and then it is the same read
-    NVDA's own `nvwave.WavePlayer._setVolumeFromConfig` makes, which NVDA calls
-    on every `open()` and `stop()`, i.e. at least as often as we play. It is an
-    in-process attribute read on the thread the synth already lives on: no I/O,
-    no lock, nothing that can block. Caching it instead would go stale exactly
-    when the setting exists to not be stale -- when the user changes voice
-    volume from the settings ring.
+    `volume` additionally reads the synth's volume when the user has turned on
+    "sound volume follows voice", and it reads it *from config* rather than
+    from the driver. NVDA's own `nvwave.WavePlayer._setVolumeFromConfig` asks
+    the driver (`getSynth().volume`), but that is not a read we can copy onto
+    this path: for a synth running under the 32-bit bridge, `.volume` resolves
+    to an RPyC round trip over a pipe to `synthDriverHost32`, which is exactly
+    the blocking call `play` must not make -- and on 2026.1 that is how every
+    remaining 32-bit synth runs.
+
+    `config.conf["speech"][<synth>]["volume"]` is the same number: the settings
+    ring writes it (`SynthSetting._set_value` sets the driver attribute *and*
+    the config key in one call), so this tracks a live volume change with no
+    driver involved and no staleness.
     """
 
     __slots__ = ()
@@ -138,18 +143,27 @@ class _NVDASettingsProvider:
 def _synth_volume():
     """The current synth's volume percentage, or None if there is none to follow.
 
-    None covers both "no synth yet" and "this synth has no volume setting",
-    which are the two cases NVDA itself falls back to `soundVolume` for.
+    Two ConfigObj lookups, no driver, nothing that can block -- see
+    `_NVDASettingsProvider` for why the driver attribute is off limits here.
+
+    None covers "no synth yet" and "this synth has no volume setting", which
+    are the two cases NVDA itself falls back to `soundVolume` for. The second
+    is read as the absence of a `volume` key: NVDA registers a driver's config
+    spec from its own `supportedSettings` when the driver loads, so the key is
+    present exactly when `isSupported("volume")` would have been true --
+    without asking the driver.
     """
     try:
-        from synthDriverHandler import getSynth
-
-        synth = getSynth()
-        if synth is not None and synth.isSupported("volume"):
-            return synth.volume
+        speech_conf = config.conf["speech"]
+        synth_name = speech_conf["synth"]
+        if not synth_name:
+            return None
+        return speech_conf[synth_name]["volume"]
+    except KeyError:
+        return None
     except Exception:
         log.debugWarning("Unspoken: could not read the synth volume", exc_info=True)
-    return None
+        return None
 
 
 def _user_themes_dir():
@@ -182,8 +196,10 @@ def _migrate_legacy_config():
        it re-runs every session and overwrites whatever the user has since
        chosen in the panel.
 
-    Only the *active* profiles are visible here; legacy keys in a profile that
-    is not active at startup are migrated the first time it is.
+    Only the profiles *active at startup* are visible here. A profile that is
+    activated later in the session is not migrated: its legacy keys mean
+    nothing to the new spec, so the four settings fall through to the base
+    profile and the spec defaults until the next NVDA start migrates it.
     """
     try:
         profiles = list(config.conf.profiles)
@@ -191,7 +207,7 @@ def _migrate_legacy_config():
         log.error("Unspoken: could not reach the config profiles to migrate", exc_info=True)
         return
 
-    migrated = False
+    migrated = []
     for profile in profiles:
         try:
             section = profile.get("unspoken")
@@ -200,18 +216,40 @@ def _migrate_legacy_config():
             before = set(section)
             migration.migrate(section)
             if set(section) != before:
-                migrated = True
+                migrated.append(profile)
         except Exception:
             log.error("Unspoken: could not migrate a config profile", exc_info=True)
 
     if not migrated:
         return
     try:
-        mark_dirty = getattr(config.conf, "_markWriteProfileDirty", None)
-        if mark_dirty is not None:
-            mark_dirty()
+        # Every profile we actually changed has to be marked, by name.
+        # `_markWriteProfileDirty` marks only the topmost one and no-ops when
+        # the base profile is all there is, so on a three-deep stack it would
+        # leave the middle profile migrated in memory and unmigrated on disk --
+        # re-migrated, and re-overwriting the user's choices, every session.
+        # `save()` always writes the base profile, which is why it needs no
+        # name of its own.
+        dirty = getattr(config.conf, "_dirtyProfiles", None)
+        for profile in migrated:
+            name = getattr(profile, "name", None)
+            if not name:
+                continue
+            if dirty is not None:
+                dirty.add(name)
+            else:  # an NVDA that keeps its dirty set somewhere else
+                mark_dirty = getattr(config.conf, "_markWriteProfileDirty", None)
+                if mark_dirty is not None:
+                    mark_dirty()
+        # Writes the whole base profile and fires pre_/post_configSave, earlier
+        # in startup than NVDA would on its own. Accepted: the alternative,
+        # leaving it to NVDA's save-on-exit, loses the migration entirely for
+        # anyone who has that turned off.
         config.conf.save()
-        log.info("Unspoken: migrated legacy settings onto the four-key config")
+        log.info(
+            f"Unspoken: migrated legacy settings onto the four-key config "
+            f"({len(migrated)} profile(s))"
+        )
     except Exception:
         log.error("Unspoken: could not save the migrated configuration", exc_info=True)
 
@@ -340,6 +378,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._previous_mouse_object = None
         self._original_properties_speech = None
         self._original_control_field_speech = None
+        self._properties_speech_hook = None
         self._control_field_hook = None
         self._degraded_message_timer = None
         self._apply_theme = None
@@ -410,13 +449,25 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         addonGui.apply_reverb = self._apply_reverb
 
         # 6. The two entry points that are patches rather than events.
-        self._original_properties_speech = speech.speech.getPropertiesSpeech
-        speech.speech.getPropertiesSpeech = self._hook_getPropertiesSpeech
-        self._original_control_field_speech = textInfos.TextInfo.getControlFieldSpeech
-        self._control_field_hook = self._make_control_field_hook(
-            self._original_control_field_speech
-        )
-        textInfos.TextInfo.getControlFieldSpeech = self._control_field_hook
+        #    Both originals are resolved, and both hooks built, before either
+        #    is installed. Resolving them is exactly the step that breaks when
+        #    a future NVDA renames or moves a hook point -- the case
+        #    docs/smoke-test.md exists to catch -- and a raise between the two
+        #    assignments would leave suppression installed with nothing to
+        #    remove it: `globalPluginHandler` catches the exception, the plugin
+        #    never reaches `runningPlugins`, and `terminate` is never called.
+        #    Then NVDA would announce no roles and play no sounds, all session.
+        original_properties_speech = speech.speech.getPropertiesSpeech
+        original_control_field_speech = textInfos.TextInfo.getControlFieldSpeech
+        properties_hook = self._make_properties_speech_hook(original_properties_speech)
+        control_field_hook = self._make_control_field_hook(original_control_field_speech)
+
+        self._original_properties_speech = original_properties_speech
+        self._original_control_field_speech = original_control_field_speech
+        self._properties_speech_hook = properties_hook
+        self._control_field_hook = control_field_hook
+        speech.speech.getPropertiesSpeech = properties_hook
+        textInfos.TextInfo.getControlFieldSpeech = control_field_hook
 
         _log_ancestor_coinstall()
         log.info(
@@ -452,8 +503,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         Plays when the mouse moves onto a different object. `!=` on NVDAObjects
         compares through the underlying accessible; #28 measured it at 0.01 ms.
+        It is a COM call, so it can raise, and it is inside the guard for the
+        same reason every other property read is: `nextHandler` runs either way.
         """
-        if obj != self._previous_mouse_object:
+        try:
+            moved = obj != self._previous_mouse_object
+        except Exception:
+            log.debugWarning("Unspoken: could not compare mouse objects", exc_info=True)
+            moved = False
+        if moved:
             self._previous_mouse_object = obj
             self._play_object(obj)
         nextHandler()
@@ -565,30 +623,38 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     # ------------------------------------------------------ suppression only
 
-    def _hook_getPropertiesSpeech(self, *args, **kwargs):
-        """Suppression, and only suppression: this hook never plays.
+    def _make_properties_speech_hook(self, original):
+        """Patch `speech.speech.getPropertiesSpeech` -- suppression, and only that.
 
-        Gated on three things -- not degraded, the role maps to a slot, and
-        role announcement is "sounds". Because every path that announces a role
-        now also plays one, suppress-iff-play holds by construction; the
-        pre-existing bug where Word's "link" was deleted with no sound ever
-        replacing it retires with the reading-path hook above.
+        This hook never plays. It is gated on three things: not degraded, the
+        role maps to a slot, and role announcement is "sounds".
+
+        The original is closed over rather than read from `self` at call time,
+        which matters for teardown: if another add-on patches over us and later
+        restores *its* original, our hook is put back and called again after we
+        have terminated. A closure still works then; an attribute we had nulled
+        would raise `TypeError` on NVDA's only path for object-property speech.
 
         `role` can only arrive as a keyword (NVDA's signature is
         `getPropertiesSpeech(reason, **propertyValues)`), so every other
         argument passes through untouched and NVDA's own default for `reason`
         is preserved.
         """
-        if not self._degraded:
-            role = kwargs.get("role")
-            if (
-                role is not None
-                and roles.slot_for(role) is not None
-                and _conf("roleAnnouncement") == "sounds"
-            ):
-                # NVDA does not announce a role handed to it as `_role`.
-                kwargs["_role"] = kwargs.pop("role")
-        return self._original_properties_speech(*args, **kwargs)
+        plugin = self
+
+        def getPropertiesSpeech(*args, **kwargs):
+            if not plugin._degraded:
+                role = kwargs.get("role")
+                if (
+                    role is not None
+                    and roles.slot_for(role) is not None
+                    and _conf("roleAnnouncement") == "sounds"
+                ):
+                    # NVDA does not announce a role handed to it as `_role`.
+                    kwargs["_role"] = kwargs.pop("role")
+            return original(*args, **kwargs)
+
+        return getPropertiesSpeech
 
     # ------------------------------------------------------- settings panel
 
@@ -655,17 +721,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except Exception:
             log.debugWarning("Unspoken: could not release the panel hooks", exc_info=True)
 
+        # Neither hook's saved original is cleared here, and neither hook is
+        # dropped. When we decline to restore because someone patched over us,
+        # their own teardown will reinstate ours -- and it has to keep working
+        # after we are gone, on NVDA's only path for object-property speech.
         try:
-            if self._original_properties_speech is not None and (
-                speech.speech.getPropertiesSpeech == self._hook_getPropertiesSpeech
+            if self._properties_speech_hook is not None and (
+                speech.speech.getPropertiesSpeech is self._properties_speech_hook
             ):
                 speech.speech.getPropertiesSpeech = self._original_properties_speech
         except Exception:
             log.debugWarning("Unspoken: could not restore getPropertiesSpeech", exc_info=True)
-        self._original_properties_speech = None
 
         try:
-            if self._original_control_field_speech is not None and (
+            if self._control_field_hook is not None and (
                 textInfos.TextInfo.getControlFieldSpeech is self._control_field_hook
             ):
                 textInfos.TextInfo.getControlFieldSpeech = (
@@ -673,8 +742,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 )
         except Exception:
             log.debugWarning("Unspoken: could not restore getControlFieldSpeech", exc_info=True)
-        self._original_control_field_speech = None
-        self._control_field_hook = None
 
         try:
             if self._settings_panel is not None:
@@ -690,5 +757,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except Exception:
             log.debugWarning("Unspoken: could not close the Sound Player", exc_info=True)
         self._player = SilentSoundPlayer()
+
+        # A terminated plugin can produce no role sound, so if one of our hooks
+        # is ever reinstated by someone else's teardown it must not suppress.
+        self._degraded = True
 
         super().terminate()

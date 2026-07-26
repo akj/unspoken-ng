@@ -29,11 +29,10 @@ SAY_ALL_REASON = "SAYALL"
 #: `OutputReason` names the reading path plays for.
 #:
 #: `FOCUS` is excluded deliberately rather than accidentally: `event_gainFocus`
-#: has already played that object, so excluding it is the dedup, by
-#: construction (zero double-fires across 1,789 measured records in #32).
-#: `ONLYCACHE` never reaches a hook that is about to speak. Everything else --
-#: `QUERY`, `CHANGE`, `MESSAGE`, `MOUSE`, `FOCUSENTERED` -- is not the reading
-#: path.
+#: has already played that object, so excluding it is the dedup (zero
+#: double-fires across 1,789 measured records in #32). `ONLYCACHE` never
+#: reaches a hook that is about to speak. Everything else -- `QUERY`, `CHANGE`,
+#: `MESSAGE`, `MOUSE`, `FOCUSENTERED` -- is not the reading path.
 PLAY_REASONS = frozenset({"CARET", "QUICKNAV", SAY_ALL_REASON})
 
 #: The two `fieldType` values NVDA announces a control on.
@@ -43,6 +42,18 @@ PLAY_REASONS = frozenset({"CARET", "QUICKNAV", SAY_ALL_REASON})
 #: inside, which in Word is the enclosing EDITABLETEXT on every line --- 76
 #: repeats in 40 keypresses (#32). That filter would play the editable-text
 #: sound roughly twice per line, forever.
+#:
+#: **Known accepted cost.** Excluding `start_inControlFieldStack` is not quite
+#: exact, so "suppress if and only if we play" is *nearly* true rather than
+#: true. `speech.py` does emit a role for that fieldType in one case:
+#: `speakWithinForLine`, which applies only to `PRESCAT_SINGLELINE` fields. A
+#: single-line field whose role maps to a slot is therefore suppressed with no
+#: sound replacing it. It does not occur anywhere in #32's 2,473 measured calls
+#: -- Word's repeated EDITABLETEXT is multiline and LISTITEM is
+#: `PRESCAT_MARKER` -- and widening the filter to catch it would reinstate
+#: those 76 repeats per 40 keypresses, which is far worse. Recorded here and in
+#: PR #51 so it lands as a stated cost; folding it into spec section 13 is
+#: Andrew's call, not this module's.
 PLAY_FIELD_TYPES = frozenset({"start_addedToControlFieldStack", "start_relative"})
 
 

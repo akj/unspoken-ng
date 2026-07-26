@@ -19,9 +19,24 @@ CANONICAL_SLOTS = {
     "treeviewitem",
 }
 THEME_PREFIX = "globalPlugins/Unspoken/sound-themes/default/"
+MODULE_PREFIX = "globalPlugins/Unspoken/"
 REQUIRED_FILES = {
     "globalPlugins/Unspoken/soft_oal.dll",
     f"{THEME_PREFIX}theme.ini",
+    # Every module the plugin imports. A module that stops being packaged is a
+    # crash on the first NVDA start after release, not a test failure.
+    f"{MODULE_PREFIX}__init__.py",
+    f"{MODULE_PREFIX}addonGui.py",
+    f"{MODULE_PREFIX}migration.py",
+    f"{MODULE_PREFIX}player.py",
+    f"{MODULE_PREFIX}roles.py",
+    f"{MODULE_PREFIX}spatial.py",
+    f"{MODULE_PREFIX}themes.py",
+    f"{MODULE_PREFIX}wiring.py",
+}
+#: Retired by #38. Shipping it again would mean a stale tree, not a new file.
+FORBIDDEN_FILES = {
+    f"{MODULE_PREFIX}openal_audio.py",
 }
 
 
@@ -40,6 +55,10 @@ def main():
     missing_files = REQUIRED_FILES - entries
     if missing_files:
         raise AssertionError(f"Missing required files: {sorted(missing_files)}")
+
+    shipped_forbidden = FORBIDDEN_FILES & entries
+    if shipped_forbidden:
+        raise AssertionError(f"Retired files still shipped: {sorted(shipped_forbidden)}")
 
     expected_wavs = {
         f"{THEME_PREFIX}{slot}.wav" for slot in CANONICAL_SLOTS
@@ -81,6 +100,7 @@ def main():
     print(f"Canonical slot WAVs ({len(actual_wavs)}):")
     for entry in sorted(actual_wavs):
         print(f"  {entry}")
+    print(f"Retired files absent: {sorted(FORBIDDEN_FILES)}")
     print(f".pyc entries: {len(pyc_entries)}")
     print(f"__pycache__ entries: {len(pycache_entries)}")
     print("Artifact verification passed.")

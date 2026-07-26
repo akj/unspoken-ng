@@ -22,10 +22,23 @@ and what "pass" sounds like.
 | Log | `%TEMP%\nvda.log`, at log level **Debug** (NVDA menu → Preferences → Settings → General → Logging level) |
 | Panel | NVDA menu → Preferences → Settings → **Unspoken-ng** |
 | Headphones | Required. The whole point is left/right/up/down placement; laptop speakers will not show it |
-| Test pages | Any page with links, buttons and checkboxes across the full width of the screen. The `.scratch/audio-overhaul/assets/extraction-cost/reading-page.html` fixture is the one the measurements used |
+| Test page | **`docs/smoke-test-page.html`** in this repo — open it in a browser |
 
 Reset between runs where a step says so: quit NVDA, edit or delete the
 `[unspoken]` section of `%APPDATA%\nvda\nvda.ini`, start NVDA.
+
+If `docs/smoke-test-page.html` is unavailable, any page carrying all of this
+will do — the inventory is what the steps below need, not the file:
+
+- links, buttons and checkboxes in rows of three, pinned to the **left edge,
+  the centre and the right edge** of the window (azimuth is unfalsifiable if
+  every control sits in the same place)
+- a combo box, a slider and a text input
+- at least two headings and a list of three items, one containing an inline link
+- several paragraphs of plain prose, with a link, a button and a checkbox
+  **inside** the flow, so a say all crosses controls rather than ending at them
+- enough vertical extent that some controls are near the top of the screen and
+  some near the bottom (elevation, same argument as azimuth)
 
 ---
 
@@ -158,6 +171,12 @@ Set **Role announcement** to each value in turn and Tab through a dialog.
 
 - Fail: any combination where the role is neither spoken nor sounded. That is
   the bug this rebuild retires; it must not be reachable from the panel.
+
+  One known exception, accepted and recorded in `wiring.py` beside
+  `PLAY_FIELD_TYPES`: a **single-line** editable field that NVDA announces
+  through `speakWithinForLine` is suppressed with no sound. It did not occur
+  anywhere in the #32 measurement run. If you hit it, note it — it is a known
+  cost awaiting a spec §13 amendment, not a new failure.
 
 ---
 
