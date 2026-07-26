@@ -123,17 +123,32 @@ def wait_until(predicate, timeout=10.0):
     return predicate()
 
 
+@pytest.fixture(scope="session")
+def audio_endpoint():
+    """Decide once whether this machine can play anything at all (spec §11).
+
+    One probe against the *default* device, skipping only on
+    `NoAudioEndpointError` -- the single site that means "there is no output
+    device here". Every other construction in the suite is then strict, so a
+    broken build fails instead of skipping: with the §9.3 named-device
+    fallback removed, or the DLL missing, these tests go red, not green.
+    """
+    try:
+        probe = player.OpenALSoundPlayer(FakeSettings())
+    except player.NoAudioEndpointError as error:
+        pytest.skip(f"no usable audio endpoint on this machine: {error}")
+    probe.close()
+    return True
+
+
 @pytest.fixture
-def make_player():
-    """Build OpenAL adapters and always close them; skip when there is no device."""
+def make_player(audio_endpoint):
+    """Build OpenAL adapters and always close them. Nothing here is caught."""
     built = []
 
     def factory(settings=None, **kwargs):
         settings = FakeSettings() if settings is None else settings
-        try:
-            adapter = player.OpenALSoundPlayer(settings, **kwargs)
-        except RuntimeError as error:
-            pytest.skip(f"no usable audio endpoint on this machine: {error}")
+        adapter = player.OpenALSoundPlayer(settings, **kwargs)
         built.append(adapter)
         return adapter
 
@@ -240,15 +255,74 @@ def test_the_device_event_callback_is_total(make_player):
         def set(self):
             raise MemoryError("out of everything")
 
+    real_wake = adapter._wake
     adapter._wake = ExplodingEvent()
-    adapter._on_alc_event(
-        player.ALC_EVENT_TYPE_DEVICE_REMOVED_SOFT,
-        player.ALC_PLAYBACK_DEVICE_SOFT,
-        None,
-        0,
-        None,
-        None,
-    )  # must return, not raise
+    try:
+        adapter._on_alc_event(
+            player.ALC_EVENT_TYPE_DEVICE_REMOVED_SOFT,
+            player.ALC_PLAYBACK_DEVICE_SOFT,
+            None,
+            0,
+            None,
+            None,
+        )  # must return, not raise
+    finally:
+        adapter._wake = real_wake  # the worker is waiting on the real one
+
+
+def test_close_clears_the_callback_even_when_disabling_events_raises(make_player, caplog):
+    """The clear is the call that matters: it is what makes OpenAL forget us."""
+    caplog.set_level(logging.DEBUG)
+    adapter = make_player()
+    real_control = adapter._alc_event_control
+    real_callback = adapter._alc_event_callback
+    cleared = []
+
+    def angry_control(count, types, enable):
+        raise RuntimeError("the driver is having a bad day")
+
+    def recording_callback(proc, user_param):
+        cleared.append(proc)
+
+    adapter._alc_event_control = angry_control
+    adapter._alc_event_callback = recording_callback
+    adapter.close()
+
+    assert cleared == [None], "the callback pointer is cleared even when the disable fails"
+    assert not adapter._events_registered
+    # Our stubs meant OpenAL never really heard any of that; put it back to a
+    # safe state before the next test opens a device.
+    real_control(len(player._EVENT_TYPES), player._EVENT_TYPES, player.AL_FALSE)
+    real_callback(None, None)
+
+
+def test_a_callback_that_cannot_be_cleared_is_kept_alive(make_player):
+    """A collected trampoline OpenAL still points at is a crash, not a leak."""
+    adapter = make_player()
+    real_control = adapter._alc_event_control
+    real_callback = adapter._alc_event_callback
+    trampoline = adapter._event_proc
+
+    def angry_callback(proc, user_param):
+        raise RuntimeError("cannot clear")
+
+    adapter._alc_event_callback = angry_callback
+    before = len(player._ORPHANED_EVENT_PROCS)
+    adapter.close()
+
+    assert len(player._ORPHANED_EVENT_PROCS) == before + 1
+    assert player._ORPHANED_EVENT_PROCS[-1] is trampoline
+    real_control(len(player._EVENT_TYPES), player._EVENT_TYPES, player.AL_FALSE)
+    real_callback(None, None)
+
+
+def test_a_construction_failure_that_is_not_a_missing_endpoint_is_not_skippable(tmp_path):
+    """Only "this machine has no audio" may skip; everything else must fail."""
+    broken = tmp_path / "not-really-a.dll"
+    broken.write_bytes(b"certainly not a PE image")
+    with pytest.raises(RuntimeError) as caught:
+        player.OpenALSoundPlayer(FakeSettings(), dll_path=str(broken))
+    assert not isinstance(caught.value, player.NoAudioEndpointError)
 
 
 # --------------------------------------------------------------------------
@@ -334,8 +408,12 @@ def test_a_failing_reopen_tries_named_then_default_then_gives_up(loaded, caplog)
     assert len(warnings) == 1, "one warning on entering disconnected, never one per play"
 
 
+def fire_event(adapter, event_type):
+    adapter._on_alc_event(event_type, player.ALC_PLAYBACK_DEVICE_SOFT, None, 0, None, None)
+
+
 def test_an_os_default_move_only_reopens_when_we_follow_the_default(loaded):
-    """Eager, per spec §9.3 -- but a pinned device does not care where the default went."""
+    """Eager, per spec §9.3 -- but a working pinned device does not care."""
     attempts = []
 
     def stub_reopen(device, name, attributes):
@@ -343,27 +421,79 @@ def test_an_os_default_move_only_reopens_when_we_follow_the_default(loaded):
         return 1
 
     loaded._alc_reopen = stub_reopen
-    loaded._on_alc_event(
-        player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT,
-        player.ALC_PLAYBACK_DEVICE_SOFT,
-        None,
-        0,
-        None,
-        None,
-    )
+    fire_event(loaded, player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT)
     assert wait_until(lambda: attempts == [None]), "following the default means following it eagerly"
 
-    loaded._requested_device = DEAD_ENDPOINT  # user pinned a device
-    loaded._on_alc_event(
-        player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT,
-        player.ALC_PLAYBACK_DEVICE_SOFT,
-        None,
-        0,
-        None,
-        None,
-    )
+    # A pinned device, opened successfully: not on the fallback, not disconnected.
+    loaded._settings.device = "pinned-endpoint"
+    loaded._requested_device = "pinned-endpoint"
+    loaded._on_fallback = False
+    fire_event(loaded, player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT)
     time.sleep(0.2)
-    assert attempts == [None], "a default move is not our business when a device is pinned"
+    assert attempts == [None], "a default move is not our business when a working device is pinned"
+
+
+def test_an_os_default_move_is_a_way_back_when_we_are_on_the_fallback(make_player):
+    """The user pinned a device that failed; the default just moved to a live one."""
+    adapter = make_player(FakeSettings(device=DEAD_ENDPOINT))
+    assert adapter._on_fallback
+    attempts = []
+
+    def stub_reopen(device, name, attributes):
+        attempts.append(name)
+        return 0 if name is not None else 1
+
+    adapter._alc_reopen = stub_reopen
+    fire_event(adapter, player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT)
+    assert wait_until(lambda: len(attempts) >= 2)
+    assert attempts == [DEAD_ENDPOINT.encode(), None]
+    assert adapter._playable
+
+
+def test_a_device_event_acts_on_the_device_configured_now(loaded):
+    """The memo goes stale while disconnected, because play() never refreshes it."""
+    loaded._mark_disconnected()
+    attempts = []
+
+    def stub_reopen(device, name, attributes):
+        attempts.append(name)
+        return 1
+
+    loaded._alc_reopen = stub_reopen
+    loaded._settings.device = "a-working-device"  # user picks one in NVDA's settings
+    fire_event(loaded, player.ALC_EVENT_TYPE_DEVICE_ADDED_SOFT)
+
+    assert wait_until(lambda: loaded._playable), "a disconnected player must be reachable again"
+    assert attempts == [b"a-working-device"], "the event acts on current config, not on the memo"
+    assert loaded._requested_device == "a-working-device"
+
+
+def test_a_reopen_that_raises_leaves_the_player_recoverable(loaded, caplog):
+    """A raise must land as "disconnected", never as silence with no way back."""
+    caplog.set_level(logging.DEBUG)
+
+    def exploding_reopen(device, name, attributes):
+        raise OSError("the driver went away mid-call")
+
+    loaded._alc_reopen = exploding_reopen
+    loaded._settings.device = DEAD_ENDPOINT
+    loaded.play("button", POSITION)
+
+    assert wait_until(lambda: loaded._disconnected)
+    assert not loaded._reopening
+    assert not loaded._playable
+
+    attempts = []
+
+    def stub_reopen(device, name, attributes):
+        attempts.append(name)
+        return 1
+
+    loaded._alc_reopen = stub_reopen
+    fire_event(loaded, player.ALC_EVENT_TYPE_DEVICE_ADDED_SOFT)
+    assert wait_until(lambda: loaded._playable), "the next device event is a genuine retry"
+    assert not loaded._disconnected
+    assert attempts == [DEAD_ENDPOINT.encode()]
 
 
 def test_a_device_event_retries_the_configured_device_we_fell_back_from(make_player):
@@ -377,14 +507,7 @@ def test_a_device_event_retries_the_configured_device_we_fell_back_from(make_pla
         return 0 if name is not None else 1  # still absent; the default still works
 
     adapter._alc_reopen = stub_reopen
-    adapter._on_alc_event(
-        player.ALC_EVENT_TYPE_DEVICE_ADDED_SOFT,
-        player.ALC_PLAYBACK_DEVICE_SOFT,
-        None,
-        0,
-        None,
-        None,
-    )
+    fire_event(adapter, player.ALC_EVENT_TYPE_DEVICE_ADDED_SOFT)
     assert wait_until(lambda: len(attempts) >= 2)
     assert attempts == [DEAD_ENDPOINT.encode(), None]
     assert not adapter._disconnected, "a working fallback is not a disconnection"
@@ -464,9 +587,9 @@ def test_the_voice_pool_steals_the_oldest_voice_through_a_ramp(make_player, capl
     caplog.set_level(logging.DEBUG)
     adapter = make_player()
     adapter.set_theme(theme(milliseconds=600))
-    for _ in range(20):
+    for _ in range(15):
         adapter.play("button", POSITION)
-        time.sleep(0.015)
+        time.sleep(0.020)
 
     assert len(adapter._active) <= player.VOICE_CAP, "polyphony cap not held"
     assert "without a ramp" not in caplog.text, "steals at navigation speed must all be ramped"
@@ -474,6 +597,22 @@ def test_the_voice_pool_steals_the_oldest_voice_through_a_ramp(make_player, capl
         lambda: len(adapter._idle) + len(adapter._active) == len(adapter._voices)
     ), "voices leaked into the retiring queue"
     assert al_error(adapter) == player.AL_NO_ERROR
+
+
+def test_a_starved_acquire_evicts_exactly_one_voice(make_player):
+    """The hard cut costs one voice, not two (the retire-then-cut double eviction)."""
+    adapter = make_player()
+    adapter.set_theme(theme(milliseconds=600))
+    for _ in range(player.VOICE_CAP + player.RAMP_HEADROOM):
+        adapter.play("button", POSITION)
+    assert not adapter._idle, "the pool should be starved by now"
+
+    active_before = len(adapter._active)
+    retiring_before = len(adapter._retiring)
+    adapter.play("button", POSITION)
+
+    assert len(adapter._active) == active_before, "one voice out, one voice in"
+    assert len(adapter._retiring) == retiring_before, "a starved steal must not also fill the ramp"
 
 
 def test_a_burst_beyond_the_ramp_headroom_still_plays_and_recycles(make_player):

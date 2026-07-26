@@ -77,6 +77,22 @@ except ImportError:  # pragma: no cover - off-NVDA (tests, tooling)
 # --------------------------------------------------------------------------
 
 
+class NoAudioEndpointError(RuntimeError):
+    """Neither the configured device nor the default device would open.
+
+    The one construction failure that means "this machine has nothing to play
+    through" rather than "this build is broken". The wiring (#38) treats every
+    construction failure the same way -- degraded mode -- but tests must be
+    able to skip on this one and only this one (spec §11).
+    """
+
+
+#: Event-callback trampolines that could not be unregistered. OpenAL may still
+#: hold the address, so they are kept alive for the life of the process rather
+#: than freed into a callback that would land in freed memory.
+_ORPHANED_EVENT_PROCS: list = []
+
+
 @runtime_checkable
 class SoundPlayer(Protocol):
     """Four fire-and-forget commands. See the module docstring for the contract."""
@@ -193,17 +209,31 @@ AL_FILTER_NULL = 0x0000
 #: Concurrent audible voices (spec §6: polyphony cap ~8).
 VOICE_CAP = 8
 
-#: Extra sources beyond the cap. A stolen voice is ramped down by the worker
-#: over RAMP_SECONDS before it can be reused; these sources are the headroom
+#: Extra sources beyond the cap. A stolen voice is unusable until the worker
+#: has ramped it down (~52 ms, see RAMP_STEPS); these sources are the headroom
 #: that lets the *stealing* play take a silent source immediately instead of
-#: hard-cutting one. Two of them tolerate two steals inside one ramp window.
-RAMP_HEADROOM = 2
+#: hard-cutting one. The count is the envelope divided by the shortest steal
+#: interval worth covering: four spans steals about 13 ms apart, which is
+#: faster than NVDA announces. Past that it degrades to the hard cut.
+RAMP_HEADROOM = 4
 
 #: Gain steps a stolen voice is walked down through, and the wait between them.
 #: This is an amplitude envelope on the worker thread, not a timer: no device
 #: state, retry or recovery depends on it.
+#:
+#: The step has to outlast a mixer update or the envelope is not one. WASAPI
+#: shared mode pins a ~10 ms period, so a whole ramp faster than that is
+#: written and overwritten between two updates: the mixer renders one gain
+#: jump and the steal clicks anyway. 8 ms per step spreads five gains over
+#: roughly four updates, and the stop waits a further full period after the
+#: final zero so the mixer actually renders silence before the voice is cut.
 RAMP_STEPS = (0.6, 0.35, 0.18, 0.07, 0.0)
-RAMP_STEP_SECONDS = 0.002
+RAMP_STEP_SECONDS = 0.008
+
+#: Ticks to wait at zero gain before the voice is actually stopped, so the
+#: mixer renders the silence instead of cutting in the same update as the last
+#: gain write. Two 8 ms ticks clear one ~10 ms period with margin.
+RAMP_STOP_TICKS = 2
 
 #: Values of NVDA's `[audio] outputDevice` that mean "the OS default device",
 #: which OpenAL spells as a NULL device name.
@@ -255,7 +285,10 @@ _ALC_EVENT_PROC = ctypes.CFUNCTYPE(
     ctypes.c_int,  # ALCenum deviceType
     ctypes.c_void_p,  # ALCdevice *device
     ctypes.c_int,  # ALCsizei length
-    ctypes.c_char_p,  # const ALCchar *message
+    # const ALCchar *message -- deliberately NOT c_char_p. ctypes would strlen
+    # past the API's own `length` and heap-allocate a bytes object on the
+    # OpenAL C thread before the callback's guard can run. We never read it.
+    ctypes.c_void_p,
     ctypes.c_void_p,  # void *userParam
 )
 _ALC_EVENT_CONTROL_PROC = ctypes.CFUNCTYPE(
@@ -491,7 +524,9 @@ class OpenALSoundPlayer:
             self.close()
             raise
 
-        self._playable = True
+        # Never a raw store: a device event can land in the construction window
+        # and the worker's verdict has to win.
+        self._update_playable()
         log.debug(
             f"Unspoken Sound Player ready on {self._device_description()!r} "
             f"({len(self._voices)} sources, cap {VOICE_CAP}, ALSOFT_CONF={self._alsoft_conf_path!r})"
@@ -528,7 +563,9 @@ class OpenALSoundPlayer:
             device = self._al.alcOpenDevice(None)
             self._on_fallback = bool(device)
         if not device:
-            raise RuntimeError("Unspoken: alcOpenDevice returned NULL for both the configured and default device")
+            raise NoAudioEndpointError(
+                "Unspoken: alcOpenDevice returned NULL for both the configured and default device"
+            )
         self._device = device
 
     def _create_context(self) -> None:
@@ -614,8 +651,11 @@ class OpenALSoundPlayer:
         # into freed memory and takes NVDA with it.
         self._event_proc = _ALC_EVENT_PROC(self._on_alc_event)
         self._alc_event_callback(ctypes.cast(self._event_proc, ctypes.c_void_p), None)
-        self._alc_event_control(len(_EVENT_TYPES), _EVENT_TYPES, AL_TRUE)
+        # OpenAL holds the trampoline's address from this line onwards, so
+        # close() must unregister from this line onwards: the flag is set
+        # before the enable call, not after it.
         self._events_registered = True
+        self._alc_event_control(len(_EVENT_TYPES), _EVENT_TYPES, AL_TRUE)
 
     # -- the play path (NVDA's main thread) ---------------------------------
 
@@ -671,16 +711,16 @@ class OpenALSoundPlayer:
         active = self._active
         if len(active) >= VOICE_CAP:
             self._reclaim_finished()
+        if self._idle:
+            # Exactly one voice is evicted per play, and only when there is a
+            # silent source to hand out in its place: retiring the oldest
+            # before knowing that would cost a second voice on the hard-cut
+            # path below and leave polyphony under the cap for the rest of a
+            # burst.
             if len(active) >= VOICE_CAP:
-                # At the cap: retire the oldest voice through the worker's gain
-                # ramp and take a headroom source for this play.
                 self._retiring.append(active.popleft())
                 self._wake.set()
-        if self._idle:
-            try:
-                return self._idle.popleft()
-            except IndexError:  # pragma: no cover - lost the race with nobody
-                pass
+            return self._idle.popleft()
         # No silent source left: more steals landed inside one ramp window than
         # the headroom covers. Cutting the oldest voice risks a click; dropping
         # the announcement's sound is worse, so cut.
@@ -725,8 +765,14 @@ class OpenALSoundPlayer:
         """
         if self._closed:
             return
+        fresh: dict[str, int] = {}
+        published = False
         try:
-            fresh: dict[str, int] = {}
+            # alGetError is per-context state the worker's AL calls also write,
+            # so a code read here can belong to a ramp rather than to the call
+            # above it. Both readers are benign under that: a slot can be
+            # dropped or a dead buffer kept for the next attempt, and neither
+            # touches a playing voice.
             self._al.alGetError()  # clear
             for slot, sample in sounds.items():
                 frames, source_rate = sample
@@ -749,6 +795,7 @@ class OpenALSoundPlayer:
 
             previous = self._buffers
             self._buffers = fresh  # one atomic rebind; play reads the new dict next call
+            published = True
             # Idle voices still reference the old buffers; detaching lets the
             # old set be deleted. Voices still sounding keep theirs until they
             # are reused, so a buffer that refuses to die is retried after the
@@ -760,6 +807,10 @@ class OpenALSoundPlayer:
             self._retired_buffers = still_held + list(previous.values())
             log.debug(f"Unspoken: sound theme set, {len(fresh)} slots")
         except Exception as error:
+            if not published:
+                # Nothing plays these yet, so they are ours to free; leaving
+                # them would leak a whole theme's samples per failed attempt.
+                self._delete_buffers(list(fresh.values()))
             self._log_once("set_theme", f"Unspoken: set_theme failed: {error}")
 
     def set_reverb(self, preset: str) -> None:
@@ -836,22 +887,55 @@ class OpenALSoundPlayer:
                 self._log_once("worker", f"Unspoken: Sound Player worker error: {error}")
 
     def _run_ramps(self) -> None:
-        while self._retiring:
-            try:
-                voice = self._retiring.popleft()
-            except IndexError:  # pragma: no cover
+        """Fade every stolen voice out, all of them at once.
+
+        The envelopes are interleaved rather than run back to back: one worker
+        walking one voice at a time would retire a voice per envelope (~56 ms),
+        which is slower than fast navigation steals them, and the pool would
+        starve into hard cuts no matter how much headroom it had. Interleaved,
+        a voice comes back every tick once the pipeline is full, and the whole
+        thing still costs one sleep per tick.
+        """
+        fading: list[list[int]] = []  # [voice, tick]
+        last_tick = len(RAMP_STEPS) + RAMP_STOP_TICKS
+        while True:
+            while self._retiring:
+                try:
+                    fading.append([self._retiring.popleft(), 0])
+                except IndexError:  # pragma: no cover - nobody else pops it
+                    break
+            if not fading:
                 return
-            try:
-                for gain in RAMP_STEPS:
-                    self._al.alSourcef(voice, AL_GAIN, ctypes.c_float(gain))
-                    time.sleep(RAMP_STEP_SECONDS)
-                self._al.alSourceStop(voice)
-                self._al.alSourcei(voice, AL_BUFFER, AL_NONE)
-            finally:
+            still_fading = []
+            for entry in fading:
+                voice, tick = entry
+                entry[1] = tick + 1
+                try:
+                    if tick < len(RAMP_STEPS):
+                        self._al.alSourcef(voice, AL_GAIN, ctypes.c_float(RAMP_STEPS[tick]))
+                        still_fading.append(entry)
+                        continue
+                    if tick < last_tick:  # sit at zero while the mixer catches up
+                        still_fading.append(entry)
+                        continue
+                    self._al.alSourceStop(voice)
+                    self._al.alSourcei(voice, AL_BUFFER, AL_NONE)
+                except Exception as error:
+                    self._log_once("ramp", f"Unspoken: retiring a voice failed: {error}")
+                # However it ended, the voice goes back in the pool.
                 self._idle.append(voice)
+            fading = still_fading
+            if fading:
+                time.sleep(RAMP_STEP_SECONDS)
 
     def _service_devices(self) -> None:
         while self._reopen_pending or self._default_device_changed or self._device_list_changed:
+            # The memo is otherwise only refreshed by play(), which returns
+            # before compare-on-play while the player is disconnected -- so a
+            # user picking a working device in NVDA's settings would never be
+            # seen. Reading it here means every event acts on the configuration
+            # the user has now, without adding anything to the play path.
+            self._refresh_requested_device()
             if self._reopen_pending:
                 # The user changed NVDA's device: lazy, noticed by
                 # compare-on-play, executed here because alcReopenDeviceSOFT
@@ -861,9 +945,15 @@ class OpenALSoundPlayer:
                 continue
             if self._default_device_changed:
                 self._default_device_changed = False
-                # Eager: the user just put headphones on. Only our business if
-                # we are the ones following the default.
-                if self._requested_device in DEFAULT_DEVICE_NAMES:
+                # Eager: the user just put headphones on. Our business if we
+                # follow the default -- and also if we are sitting on the
+                # default because the configured device failed, or if we have
+                # nothing at all, since the new default may be the way back.
+                if (
+                    self._requested_device in DEFAULT_DEVICE_NAMES
+                    or self._on_fallback
+                    or self._disconnected
+                ):
                     self._reopen(self._requested_device)
                 continue
             self._device_list_changed = False
@@ -873,6 +963,20 @@ class OpenALSoundPlayer:
             # both cases, and it is the only retry there is.
             if self._disconnected or self._on_fallback or not self._is_connected():
                 self._reopen(self._requested_device)
+
+    def _refresh_requested_device(self) -> None:
+        """Re-read the configured device on the worker thread, keeping the old value on failure."""
+        try:
+            configured = self._settings.output_device
+        except Exception as error:
+            self._log_once(
+                "provider_device",
+                f"Unspoken: settings provider could not report the output device: {error}",
+            )
+            return
+        if configured != self._requested_device:
+            self._requested_device = configured
+            self._reopen_pending = True
 
     def _is_connected(self) -> bool:
         connected = ctypes.c_int(1)
@@ -896,6 +1000,7 @@ class OpenALSoundPlayer:
         # change (spec §13). Same boolean, no extra check on the play path.
         self._reopening = True
         self._update_playable()
+        ok = False
         try:
             ok = bool(self._alc_reopen(self._device, name, self._attributes))
             self._on_fallback = False
@@ -905,10 +1010,20 @@ class OpenALSoundPlayer:
                 )
                 ok = bool(self._alc_reopen(self._device, None, self._attributes))
                 self._on_fallback = ok
+            ok = ok and self._is_connected()
+        except Exception as error:
+            # Anything thrown here must land as "disconnected", never as a
+            # player that is silent with nothing recording why: disconnected
+            # is a state the next device event genuinely retries.
+            ok = False
+            self._log_once("reopen", f"Unspoken: reopening the output device failed: {error}")
         finally:
+            # Both flags, always. Restoring _reopening without recomputing the
+            # play gate would leave the player silent for the session.
             self._reopening = False
+            self._update_playable()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        if ok and self._is_connected():
+        if ok:
             self._mark_connected(elapsed_ms)
         else:
             self._mark_disconnected()
@@ -951,17 +1066,29 @@ class OpenALSoundPlayer:
         if self._closed:
             return
         self._closed = True
-        self._playable = False
+        self._update_playable()
         try:
             # Unregister before anything else: no more callbacks into an
             # adapter that is being taken apart, and none at all by the time
-            # the DLL could go away.
+            # the DLL could go away. The two calls get their own try blocks --
+            # clearing OpenAL's pointer is the one that actually matters, and
+            # it must be attempted even if disabling the event types fails.
             if self._events_registered:
                 try:
                     self._alc_event_control(len(_EVENT_TYPES), _EVENT_TYPES, AL_FALSE)
+                except Exception as error:
+                    log.error(f"Unspoken: could not disable device events: {error}")
+                try:
                     self._alc_event_callback(None, None)
                 except Exception as error:
-                    log.error(f"Unspoken: could not unregister device events: {error}")
+                    # OpenAL may still hold the trampoline's address; keep it
+                    # alive for the process rather than let it be collected
+                    # into a callback landing in freed memory.
+                    _ORPHANED_EVENT_PROCS.append(self._event_proc)
+                    log.error(
+                        f"Unspoken: could not clear the device-event callback ({error}); "
+                        "keeping the trampoline alive for the life of the process"
+                    )
                 self._events_registered = False
 
             worker = self._worker
