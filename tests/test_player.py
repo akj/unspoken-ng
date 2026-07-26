@@ -20,7 +20,11 @@ from pathlib import Path
 
 import pytest
 
-import unspoken_player as player
+# `conftest.py` puts the addon directory on sys.path, so this is the module
+# itself rather than the addon package -- whose `__init__.py` imports NVDA.
+# The player deliberately imports nothing from its own package, which is what
+# lets it run in plain Python at all.
+import player
 
 POSITION = (0.0, 0.0, -1.0)  # dead ahead, on the unit sphere
 DEAD_ENDPOINT = "{0.0.0.00000000}.{00000000-dead-dead-dead-000000000000}"

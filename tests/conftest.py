@@ -1,35 +1,65 @@
-"""Off-NVDA test harness for the Sound Player (spec §10).
-
-`player.py` lives inside the addon package, whose `__init__.py` imports NVDA
-modules that do not exist outside NVDA's process. The player deliberately
-imports nothing from its own package, so it loads straight from the file and
-runs in plain Python -- which is what the map's spike rigs proved the DLL needs
-(no NVDA, no wave player, no COM).
-
-The module is registered as `unspoken_player` so tests can `import
-unspoken_player as player` without going through the addon package.
-"""
-
-import importlib.util
+import enum
 import sys
 from pathlib import Path
+from types import ModuleType
 
-PLAYER_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "addon"
-    / "globalPlugins"
-    / "Unspoken"
-    / "player.py"
+
+ROLE_NAMES = (
+    "CHECKBOX",
+    "RADIOBUTTON",
+    "STATICTEXT",
+    "EDITABLETEXT",
+    "BUTTON",
+    "MENUBAR",
+    "MENUITEM",
+    "MENU",
+    "COMBOBOX",
+    "LISTITEM",
+    "GRAPHIC",
+    "LINK",
+    "TREEVIEWITEM",
+    "TAB",
+    "TABCONTROL",
+    "SLIDER",
+    "DROPDOWNBUTTON",
+    "CLOCK",
+    "ANIMATION",
+    "ICON",
+    "IMAGEMAP",
+    "RADIOMENUITEM",
+    "RICHEDIT",
+    "SHAPE",
+    "TEAROFFMENU",
+    "TOGGLEBUTTON",
+    "CHART",
+    "DIAGRAM",
+    "DIAL",
+    "DROPLIST",
+    "MENUBUTTON",
+    "DROPDOWNBUTTONGRID",
+    "HOTKEYFIELD",
+    "INDICATOR",
+    "SPINBUTTON",
+    "TREEVIEWBUTTON",
+    "DESKTOPICON",
+    "PASSWORDEDIT",
+    "CHECKMENUITEM",
+    "SPLITBUTTON",
+    "UNKNOWN_TEST_ROLE",
 )
 
+# The review flagged that NVDA deprecated the module-level ROLE_* aliases
+# in favor of controlTypes.Role, an IntEnum. Stubbing with plain ints could
+# silently hide an alias collision, so this stub mirrors the real shape: a
+# genuine IntEnum with one distinct member per role, matching production
+# controlTypes.Role in kind (a real enum), not merely in appearance.
+Role = enum.IntEnum("Role", ROLE_NAMES)
 
-def load_player_module():
-    """Import `player.py` by path, bypassing the addon package."""
-    spec = importlib.util.spec_from_file_location("unspoken_player", PLAYER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["unspoken_player"] = module
-    spec.loader.exec_module(module)
-    return module
+control_types_stub = ModuleType("controlTypes")
+control_types_stub.Role = Role
+sys.modules["controlTypes"] = control_types_stub
 
-
-load_player_module()
+UNSPOKEN_DIR = (
+    Path(__file__).resolve().parents[1] / "addon" / "globalPlugins" / "Unspoken"
+)
+sys.path.insert(0, str(UNSPOKEN_DIR))
