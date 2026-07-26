@@ -24,6 +24,10 @@ def _encode_24_bit(samples):
     return bytes(encoded)
 
 
+def _encode_16_bit(samples):
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
 def _write_wav(path, samples, *, channels=1, sample_width=2, rate=22050):
     path.parent.mkdir(parents=True, exist_ok=True)
     if sample_width == 2:
@@ -278,7 +282,14 @@ def test_discover_checks_wav_headers_without_reading_frames(
     assert [info.id for info in themes.discover()] == ["default"]
 
 
-def test_24_bit_pcm_is_preserved(theme_roots):
+def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
+    """A 24-bit asset must cross the seam as 16-bit, scaled, not reinterpreted.
+
+    Core OpenAL has no 24-bit format: 3-byte frames handed to the Sound Player
+    are uploaded as `AL_FORMAT_MONO16` and rendered as full-scale noise, and
+    nothing reports an error. The conversion belongs here, after the gain
+    stage, so the RMS pass still sees the asset's full resolution.
+    """
     _, user = theme_roots
     _write_wav(
         user / "twenty-four-bit" / "button.wav",
@@ -288,11 +299,36 @@ def test_24_bit_pcm_is_preserved(theme_roots):
     )
 
     frames, source_rate = themes.load("twenty-four-bit")["button"]
-    samples = _decode_pcm(frames, 3)
+    samples = _decode_pcm(frames, 2)
 
-    assert source_rate == 48000
-    assert len(frames) == len(samples) * 3
-    assert _rms_dbfs(samples, 3) == pytest.approx(-20.0, abs=0.001)
+    assert source_rate == 48000, "the true rate still crosses the seam"
+    assert len(frames) == len(samples) * 2, "two bytes per sample, not three"
+    assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
+    assert max(abs(sample) for sample in samples) <= 32767
+    # Normalized RMS of the input is 0.094243, so the theme gain is
+    # 0.1 / 0.094243 = 1.061079; the width change divides by 2**8.
+    # 1_000_000 * 1.061079 / 256 = 4144.84 -> 4145.
+    assert samples == [-4145, 2072, 4145, -2072]
+    # Intra-theme dynamics survive: the quiet samples stay half the loud ones.
+    assert samples[0] == -samples[2]
+    assert abs(samples[0]) == pytest.approx(2 * abs(samples[1]), rel=1e-3)
+
+
+def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
+    """The seam has one width, whatever mixture of assets a theme is made of."""
+    _, user = theme_roots
+    mixed = user / "mixed-widths"
+    _write_wav(mixed / "button.wav", [-1000, 1000], sample_width=2, rate=44100)
+    _write_wav(mixed / "link.wav", [-1_000_000, 1_000_000], sample_width=3, rate=48000)
+    _write_wav(mixed / "tab.wav", [1000, 3000, -1000, -3000], channels=2, sample_width=2)
+
+    loaded = themes.load("mixed-widths")
+
+    assert {"button", "link", "tab"} <= set(loaded)
+    for slot, (frames, source_rate) in loaded.items():
+        assert len(frames) % 2 == 0, f"{slot} is not whole 16-bit frames"
+        assert frames == _encode_16_bit(_decode_pcm(frames, 2)), f"{slot} does not round-trip"
+        assert source_rate > 0
 
 
 @pytest.mark.parametrize(
