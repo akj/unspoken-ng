@@ -105,8 +105,11 @@ class _NVDASettingsProvider:
 
     The player reads both properties on NVDA's main thread inside `play`, once
     each, ahead of `alSourcePlay`. So both have to be cheap and neither may
-    block: `output_device` is one ConfigObj lookup, and `volume` is two plus
-    the arithmetic in `wiring.effective_volume`.
+    block. Counted in ConfigObj subscripts: `output_device` is 2
+    (`conf["audio"]["outputDevice"]`); `volume` is 3, or **7** with "sound
+    volume follows voice" on, plus the arithmetic in
+    `wiring.effective_volume`. Every one of them is a dict lookup against an
+    already-parsed section.
 
     `volume` additionally reads the synth's volume when the user has turned on
     "sound volume follows voice", and it reads it *from config* rather than
@@ -143,7 +146,7 @@ class _NVDASettingsProvider:
 def _synth_volume():
     """The current synth's volume percentage, or None if there is none to follow.
 
-    Two ConfigObj lookups, no driver, nothing that can block -- see
+    Four ConfigObj subscripts, no driver, nothing that can block -- see
     `_NVDASettingsProvider` for why the driver attribute is off limits here.
 
     None covers "no synth yet" and "this synth has no volume setting", which
@@ -231,16 +234,19 @@ def _migrate_legacy_config():
         # `save()` always writes the base profile, which is why it needs no
         # name of its own.
         dirty = getattr(config.conf, "_dirtyProfiles", None)
-        for profile in migrated:
-            name = getattr(profile, "name", None)
-            if not name:
-                continue
-            if dirty is not None:
-                dirty.add(name)
-            else:  # an NVDA that keeps its dirty set somewhere else
-                mark_dirty = getattr(config.conf, "_markWriteProfileDirty", None)
-                if mark_dirty is not None:
-                    mark_dirty()
+        if dirty is not None:
+            for profile in migrated:
+                name = getattr(profile, "name", None)
+                if name:
+                    dirty.add(name)
+        else:
+            # An NVDA that keeps its dirty set somewhere else. This marks only
+            # the topmost profile however many we changed, so it is the
+            # fallback, not the path -- and calling it per profile would mark
+            # that same one repeatedly.
+            mark_dirty = getattr(config.conf, "_markWriteProfileDirty", None)
+            if mark_dirty is not None:
+                mark_dirty()
         # Writes the whole base profile and fires pre_/post_configSave, earlier
         # in startup than NVDA would on its own. Accepted: the alternative,
         # leaving it to NVDA's save-on-exit, loses the migration entirely for
