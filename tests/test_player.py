@@ -27,6 +27,7 @@ import pytest
 import player
 
 POSITION = (0.0, 0.0, -1.0)  # dead ahead, on the unit sphere
+RAMP_TICK = 0.012  # a little over one worker ramp tick
 DEAD_ENDPOINT = "{0.0.0.00000000}.{00000000-dead-dead-dead-000000000000}"
 
 
@@ -615,8 +616,55 @@ def test_a_starved_acquire_evicts_exactly_one_voice(make_player):
     retiring_before = len(adapter._retiring)
     adapter.play("button", POSITION)
 
+    # `_active` is the main thread's alone, so this is exact: the double
+    # eviction showed up here as one voice fewer. `_retiring` is drained by the
+    # worker concurrently, so it can only be asserted in the direction the
+    # worker cannot move it -- it never grows behind our back.
     assert len(adapter._active) == active_before, "one voice out, one voice in"
-    assert len(adapter._retiring) == retiring_before, "a starved steal must not also fill the ramp"
+    assert len(adapter._retiring) <= retiring_before, "a starved steal must not also fill the ramp"
+
+
+def test_a_device_event_is_serviced_while_steals_keep_arriving(make_player):
+    """Fast navigation must not defer the device policy until it stops.
+
+    A steal every few ticks is enough to keep the worker inside the ramp loop
+    forever if the loop keeps admitting voices, which would turn "the device
+    event is the retry" into "the retry happens when the user stops reading".
+    """
+    adapter = make_player()
+    adapter.set_theme(theme(milliseconds=500))
+    attempts = []
+
+    def stub_reopen(device, name, attributes):
+        attempts.append(name)
+        return 1
+
+    adapter._alc_reopen = stub_reopen
+
+    # The event has to land while a ramp is in flight, which is the only state
+    # that can trap the worker: fired between worker iterations it reaches
+    # _service_devices on its way in and proves nothing. Two things follow.
+    # Steals must arrive faster than one envelope (~56 ms), so this drives
+    # plays harder than the measured 20/s navigation rate -- at 30 ms the
+    # retirement pipeline never empties, which is the condition under test.
+    # And the event fires only once that pipeline is saturated, not at the
+    # first steal, when the worker has not yet entered the loop.
+    fired_at = None
+    started = time.monotonic()
+    deadline = started + 3.0
+    while time.monotonic() < deadline:
+        adapter.play("button", POSITION)
+        if fired_at is None and time.monotonic() - started > 0.8:
+            fire_event(adapter, player.ALC_EVENT_TYPE_DEFAULT_DEVICE_CHANGED_SOFT)
+            fired_at = time.monotonic()
+        elif fired_at is not None and attempts:
+            break
+        time.sleep(0.03)
+
+    assert fired_at is not None
+    assert len(adapter._active) >= player.VOICE_CAP, "the pool never filled; the fixture is wrong"
+    assert attempts, "a device event waited on the ramp loop"
+    assert time.monotonic() - fired_at < 0.5, "the device event was serviced late"
 
 
 def test_a_burst_beyond_the_ramp_headroom_still_plays_and_recycles(make_player):

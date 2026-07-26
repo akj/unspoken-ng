@@ -218,11 +218,12 @@ AL_FILTER_NULL = 0x0000
 VOICE_CAP = 8
 
 #: Extra sources beyond the cap. A stolen voice is unusable until the worker
-#: has ramped it down (~52 ms, see RAMP_STEPS); these sources are the headroom
-#: that lets the *stealing* play take a silent source immediately instead of
-#: hard-cutting one. The count is the envelope divided by the shortest steal
-#: interval worth covering: four spans steals about 13 ms apart, which is
-#: faster than NVDA announces. Past that it degrades to the hard cut.
+#: has ramped it down (~59 ms measured, see RAMP_STEPS); these sources are the
+#: headroom that lets the *stealing* play take a silent source immediately
+#: instead of hard-cutting one. The count is the envelope divided by the
+#: shortest steal interval worth covering: four spans steals about 15 ms
+#: apart, which is faster than NVDA announces. Past that it degrades to the
+#: hard cut.
 RAMP_HEADROOM = 4
 
 #: Gain steps a stolen voice is walked down through, and the wait between them.
@@ -230,18 +231,20 @@ RAMP_HEADROOM = 4
 #: state, retry or recovery depends on it.
 #:
 #: The step has to outlast a mixer update or the envelope is not one. WASAPI
-#: shared mode pins a ~10 ms period, so a whole ramp faster than that is
-#: written and overwritten between two updates: the mixer renders one gain
-#: jump and the steal clicks anyway. 8 ms per step spreads five gains over
-#: roughly four updates, and the stop waits a further full period after the
-#: final zero so the mixer actually renders silence before the voice is cut.
+#: shared mode pins a ~10 ms period (measured: ALC_REFRESH 100 Hz), so a whole
+#: ramp faster than that is written and overwritten between two updates: the
+#: mixer renders one gain jump and the steal clicks anyway. 8 ms per step
+#: spreads five gains over 32 ms -- 3.2 update periods -- and the stop is held
+#: off for a further 24 ms (2.4 periods) so the mixer really renders the
+#: silence before the voice is cut. A retirement therefore occupies a source
+#: for seven ticks: 56 ms nominal, 59 ms measured end to end for one voice.
 RAMP_STEPS = (0.6, 0.35, 0.18, 0.07, 0.0)
 RAMP_STEP_SECONDS = 0.008
 
-#: Ticks to wait at zero gain before the voice is actually stopped, so the
+#: Ticks the voice is held at zero gain before it is actually stopped, so the
 #: mixer renders the silence instead of cutting in the same update as the last
-#: gain write. Two 8 ms ticks clear one ~10 ms period with margin.
-RAMP_STOP_TICKS = 2
+#: gain write. Three 8 ms ticks (~24 ms) clear two ~10 ms periods.
+RAMP_ZERO_HOLD_TICKS = 3
 
 #: Values of NVDA's `[audio] outputDevice` that mean "the OS default device",
 #: which OpenAL spells as a NULL device name.
@@ -697,20 +700,34 @@ class OpenALSoundPlayer:
             voice = self._acquire_voice()
             if voice is None:
                 return
-            al = self._al
-            al.alSourcei(voice, AL_BUFFER, buffer_id)
-            al.alSource3f(
-                voice,
-                AL_POSITION,
-                ctypes.c_float(position[0]),
-                ctypes.c_float(position[1]),
-                ctypes.c_float(position[2]),
-            )
-            # Voices come back from a steal with a ramped-down gain; one cheap
-            # write makes "silent role sound" unrepresentable.
-            al.alSourcef(voice, AL_GAIN, ctypes.c_float(1.0))
-            al.alSourcePlay(voice)
-            self._active.append(voice)
+            # From here the voice belongs to no queue, so every path out of
+            # this block has to put it in one. A voice dropped here is gone for
+            # the session, and enough of them starve the pool into permanent
+            # hard cuts behind a single log line.
+            placed = False
+            try:
+                al = self._al
+                al.alSourcei(voice, AL_BUFFER, buffer_id)
+                al.alSource3f(
+                    voice,
+                    AL_POSITION,
+                    ctypes.c_float(position[0]),
+                    ctypes.c_float(position[1]),
+                    ctypes.c_float(position[2]),
+                )
+                # Voices come back from a steal with a ramped-down gain; one
+                # cheap write makes "silent role sound" unrepresentable.
+                al.alSourcef(voice, AL_GAIN, ctypes.c_float(1.0))
+                al.alSourcePlay(voice)
+                self._active.append(voice)
+                placed = True
+            finally:
+                if not placed:
+                    try:
+                        self._al.alSourceStop(voice)
+                    except Exception:
+                        pass
+                    self._idle.append(voice)
         except Exception as error:  # the play path never escalates
             self._log_once("play", f"Unspoken: play({slot!r}) failed: {error}")
 
@@ -885,33 +902,57 @@ class OpenALSoundPlayer:
         while True:
             self._wake.wait()
             self._wake.clear()
-            if self._stopping:
-                self._run_ramps()  # let stolen voices land back in the pool
-                return
             try:
+                if self._stopping:
+                    # Let stolen voices land back in the pool before close()
+                    # takes the sources apart. Inside the guard like everything
+                    # else: a raise here would kill the thread silently, after
+                    # close() has already returned.
+                    self._run_ramps()
+                    return
                 self._service_devices()
                 self._run_ramps()
             except Exception as error:  # a dead worker is a dead player
                 self._log_once("worker", f"Unspoken: Sound Player worker error: {error}")
+                if self._stopping:
+                    return
 
     def _run_ramps(self) -> None:
         """Fade every stolen voice out, all of them at once.
 
         The envelopes are interleaved rather than run back to back: one worker
-        walking one voice at a time would retire a voice per envelope (~56 ms),
+        walking one voice at a time would retire a voice per envelope (~59 ms),
         which is slower than fast navigation steals them, and the pool would
         starve into hard cuts no matter how much headroom it had. Interleaved,
         a voice comes back every tick once the pipeline is full, and the whole
         thing still costs one sleep per tick.
+
+        Ramps yield to device work. Sustained stealing produces a steal every
+        few ticks, so a loop that kept admitting new voices would never end and
+        the worker would never reach `_service_devices` -- "the device event is
+        the retry" would quietly become "the retry happens once the user stops
+        navigating". Once an event is waiting, no new voice is admitted, the
+        envelopes already in flight are allowed to finish, and the worker is
+        handed back. Servicing devices from inside the tick loop would be
+        worse: a 31-470 ms reopen would freeze those envelopes at an audible
+        gain, which is the artefact this design exists to avoid.
         """
         fading: list[list[int]] = []  # [voice, tick]
-        last_tick = len(RAMP_STEPS) + RAMP_STOP_TICKS
+        # Ticks 0..len(RAMP_STEPS)-1 write a gain (the last of them zero), then
+        # RAMP_ZERO_HOLD_TICKS pass at zero before the voice is stopped.
+        last_tick = len(RAMP_STEPS) - 1 + RAMP_ZERO_HOLD_TICKS
         while True:
-            while self._retiring:
-                try:
-                    fading.append([self._retiring.popleft(), 0])
-                except IndexError:  # pragma: no cover - nobody else pops it
-                    break
+            if self._pending_device_work():
+                if self._retiring:
+                    # Re-arm: what is still queued must not sit there until
+                    # something else happens to wake the worker.
+                    self._wake.set()
+            else:
+                while self._retiring:
+                    try:
+                        fading.append([self._retiring.popleft(), 0])
+                    except IndexError:  # pragma: no cover - nobody else pops it
+                        break
             if not fading:
                 return
             still_fading = []
@@ -930,14 +971,29 @@ class OpenALSoundPlayer:
                     self._al.alSourcei(voice, AL_BUFFER, AL_NONE)
                 except Exception as error:
                     self._log_once("ramp", f"Unspoken: retiring a voice failed: {error}")
+                    # A voice returned to the pool still sounding would play
+                    # over the next role sound at whatever gain it had, so try
+                    # to silence it even now -- but never at the cost of the
+                    # append below, which is what keeps the pool whole.
+                    try:
+                        self._al.alSourceStop(voice)
+                    except Exception:
+                        pass
+                    try:
+                        self._al.alSourcei(voice, AL_BUFFER, AL_NONE)
+                    except Exception:
+                        pass
                 # However it ended, the voice goes back in the pool.
                 self._idle.append(voice)
             fading = still_fading
             if fading:
                 time.sleep(RAMP_STEP_SECONDS)
 
+    def _pending_device_work(self) -> bool:
+        return self._reopen_pending or self._default_device_changed or self._device_list_changed
+
     def _service_devices(self) -> None:
-        while self._reopen_pending or self._default_device_changed or self._device_list_changed:
+        while self._pending_device_work():
             # The memo is otherwise only refreshed by play(), which returns
             # before compare-on-play while the player is disconnected -- so a
             # user picking a working device in NVDA's settings would never be
