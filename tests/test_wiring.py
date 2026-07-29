@@ -179,6 +179,62 @@ def test_field_types_outside_the_set_never_play(field_type):
     assert not wiring.should_play_control_field("CARET", field_type, "link", False)
 
 
+# --- lead or ride: when a reading-path sound fires (ADR 0002) --------------
+
+#: Of the 113 plays, the ones that lead speech (play at build time): fields
+#: the navigation landed inside, under the two reasons whose utterance starts
+#: immediately. Written out for the same reason `EXPECTED_PLAYS` is.
+EXPECTED_LEADS = {
+    ("CARET", "start_addedToControlFieldStack", "BUTTON"): 7,
+    ("CARET", "start_addedToControlFieldStack", "CHECKBOX"): 6,
+    ("CARET", "start_addedToControlFieldStack", "EDITABLETEXT"): 6,
+    ("CARET", "start_addedToControlFieldStack", "LINK"): 16,
+    ("CARET", "start_addedToControlFieldStack", "LISTITEM"): 3,
+    ("CARET", "start_addedToControlFieldStack", "STATICTEXT"): 6,
+    ("QUICKNAV", "start_addedToControlFieldStack", "LINK"): 40,
+}
+
+
+def test_exactly_the_entered_fields_lead():
+    leads = {
+        (record["reason"], record["fieldType"], record["role"]): record["calls"]
+        for record in _records()
+        if _plays(record)
+        and not wiring.should_ride_speech(record["reason"], record["fieldType"])
+    }
+    assert leads == EXPECTED_LEADS
+    assert sum(EXPECTED_LEADS.values()) == 84
+
+
+def test_the_rest_of_the_plays_ride():
+    rides = {
+        (record["reason"], record["fieldType"], record["role"]): record["calls"]
+        for record in _records()
+        if _plays(record)
+        and wiring.should_ride_speech(record["reason"], record["fieldType"])
+    }
+    assert rides == {
+        key: calls for key, calls in EXPECTED_PLAYS.items() if key not in EXPECTED_LEADS
+    }
+    assert sum(rides.values()) == 113 - 84
+
+
+def test_say_all_rides_even_into_an_entered_field():
+    """Read-ahead queues even the utterance start, so say-all never leads."""
+    assert wiring.should_ride_speech("SAYALL", wiring.FIELD_ENTERED) is True
+
+
+@pytest.mark.parametrize("reason", ["CARET", "QUICKNAV"])
+def test_traversed_fields_ride(reason):
+    """`start_relative` is announced mid-utterance -- the #52 burst case."""
+    assert wiring.should_ride_speech(reason, "start_relative") is True
+
+
+@pytest.mark.parametrize("reason", ["CARET", "QUICKNAV"])
+def test_entered_fields_lead(reason):
+    assert wiring.should_ride_speech(reason, wiring.FIELD_ENTERED) is False
+
+
 # --- the volume the Sound Player sees -------------------------------------
 
 

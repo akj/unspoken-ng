@@ -5,12 +5,13 @@
 the plugin itself is smoke-tested live (`docs/smoke-test.md`), not unit-tested.
 But it also requires the reading-path play condition to be *"a pure predicate --
 extract it as a function and table-test it off-NVDA with the #32 dataset as
-fixtures"*, and the same argument applies to the other three judgments the
-wiring makes: what volume the Sound Player should see, whether this session can
-produce a role sound at all, and how a burst of live-preview keypresses
-collapses into one sound theme load.
+fixtures"*, and the same argument applies to the other four judgments the
+wiring makes: whether a reading-path sound leads speech or rides it, what
+volume the Sound Player should see, whether this session can produce a role
+sound at all, and how a burst of live-preview keypresses collapses into one
+sound theme load.
 
-So this module is where those four live. Everything here takes plain values and
+So this module is where those five live. Everything here takes plain values and
 returns plain values: no NVDA, no OpenAL, no I/O, no globals. `GlobalPlugin`
 keeps the property reads, the patches and the lifetime; this keeps the logic
 that can be wrong in a way a test can catch.
@@ -35,6 +36,10 @@ SAY_ALL_REASON = "SAYALL"
 #: `MESSAGE`, `MOUSE`, `FOCUSENTERED` -- is not the reading path.
 PLAY_REASONS = frozenset({"CARET", "QUICKNAV", SAY_ALL_REASON})
 
+#: The fieldType of a field the reading position just landed *inside*, named
+#: because `should_ride_speech` turns on it.
+FIELD_ENTERED = "start_addedToControlFieldStack"
+
 #: The two `fieldType` values NVDA announces a control on.
 #:
 #: The tempting filter is `fieldType.startswith("start")`, and it is wrong:
@@ -54,7 +59,7 @@ PLAY_REASONS = frozenset({"CARET", "QUICKNAV", SAY_ALL_REASON})
 #: those 76 repeats per 40 keypresses, which is far worse. Recorded here and in
 #: PR #51 so it lands as a stated cost; folding it into spec section 13 is
 #: Andrew's call, not this module's.
-PLAY_FIELD_TYPES = frozenset({"start_addedToControlFieldStack", "start_relative"})
+PLAY_FIELD_TYPES = frozenset({FIELD_ENTERED, "start_relative"})
 
 
 def should_play_control_field(
@@ -89,6 +94,31 @@ def should_play_control_field(
     if reason == SAY_ALL_REASON and silence_during_say_all:
         return False
     return True
+
+
+def should_ride_speech(reason: str | None, field_type: str | None) -> bool:
+    """Does this control field's sound wait for speech to reach the field?
+
+    Asked only after `should_play_control_field` said play. True means the
+    sound goes into the field's speech sequence as a callback and fires when
+    the synth reaches it; False means it plays at build time, leading speech
+    the way the object events do (ADR 0002).
+
+    The split needs no utterance tracking, because `fieldType` already encodes
+    it. `FIELD_ENTERED` is a field the reading position just landed *inside*:
+    its announcement heads the utterance, and under `CARET` and `QUICKNAV`
+    that utterance starts now -- both cancel current speech -- so build time
+    *is* utterance time and the sound may lead. `start_relative` is a field
+    speech will traverse mid-utterance, which is the burst-at-line-start case
+    (#52). Under `SAYALL` even the utterance start sits behind the read-ahead
+    queue, so there everything rides.
+
+    In the #32 dataset the split falls 84 leads / 29 rides across the 113
+    plays (`tests/test_wiring.py` pins the exact triples).
+    """
+    if reason == SAY_ALL_REASON:
+        return True
+    return field_type != FIELD_ENTERED
 
 
 # --------------------------------------------------------------------------
