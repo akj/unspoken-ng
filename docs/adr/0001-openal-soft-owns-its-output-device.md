@@ -42,17 +42,22 @@ crash, a device-follow split across the boundary, and two artifacts to build, pa
 
 ## Consequences
 
-- **The Sound Player seam is commands over opaque handles** — `play(slot, position) -> voice`,
-  `move(voice, position)`, `stop(voice)` — with no callbacks into Python and no shared buffers.
-  That API is already command-shaped, so the constraint is close to free, and it keeps a later
-  retreat behind a process boundary a relocation rather than a redesign.
+- **The Sound Player seam is commands** — with no callbacks into Python and no shared buffers —
+  which keeps a later retreat behind a process boundary a relocation rather than a redesign.
+  This decision originally named those commands `play(slot, position) -> voice`,
+  `move(voice, position)` and `stop(voice)`; **[ADR 0003](0003-sound-player-seam-and-module-layout.md)
+  supersedes that list**, dropping `move`, `stop` and the voice handle. Fire-and-forget commands
+  satisfy the constraint more strictly, since a `play` returning a handle would force a synchronous
+  round trip across any future process boundary, on the latency path.
 - **There is no fallback output path.** When the owned stream cannot open, the addon has nowhere to
   fall back to, so the failure and degraded-mode behaviour must be specified deliberately.
 - **The buffer is the one latency knob**, and it works 1:1 with onset. `ALSOFT_CONF`
   `[general] periods = 2` yields a 22 ms buffer — the floor, since the backend clamps 960 frames up
   to 1056 — against 32 ms at the default of 3. `ALC_REFRESH` is ignored; the 10 ms period is pinned
   by WASAPI shared mode. The addon must write `ALSOFT_CONF` into `os.environ` *before* the DLL
-  loads, which constrains module initialisation order.
+  loads. This bullet originally concluded that the write "constrains module initialisation order";
+  [ADR 0003](0003-sound-player-seam-and-module-layout.md) found it constrains nothing outside the
+  player's own constructor, and records the process-global caveat that does bite.
 - **`alcReopenDeviceSOFT` blocks for 31–470 ms** and must never run on NVDA's main thread.
 - **The loopback justification is discharged.** `openal_audio.py`'s docstring defends loopback as
   "preserving NVDA ducking and device routing"; ducking no longer applies on any branch, and device
