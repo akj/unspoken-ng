@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import itertools
+import os
 import random
 import sys
 import time
@@ -63,15 +64,44 @@ def _load(name: str):
     return module
 
 
+def list_devices(player) -> list[str]:
+    """Every output device OpenAL can see, by the exact name it wants back.
+
+    `alcOpenDevice` takes the name verbatim with no fuzzy matching (ADR 0001),
+    so guessing at a device string does not work -- this prints the ones that
+    will actually open.
+    """
+    import ctypes
+
+    dll_path = os.path.join(str(ADDON), "soft_oal.dll")
+    al = player._bind(ctypes.CDLL(dll_path))
+    pointer = al.alcGetString(None, player.ALC_ALL_DEVICES_SPECIFIER)
+    if not pointer:
+        return []
+    # A null-separated list terminated by an empty string, so walk it rather
+    # than taking string_at, which stops at the first device.
+    names = []
+    offset = 0
+    while True:
+        name = ctypes.string_at(pointer + offset)
+        if not name:
+            break
+        names.append(name.decode("utf-8", "replace"))
+        offset += len(name) + 1
+    return names
+
+
 class UnitySettings:
-    """Unity listener gain, default device.
+    """Unity listener gain, on the chosen device.
 
     The player folds `volume` straight into `alListenerf(AL_GAIN)`, so anything
     but 1.0 here would silently rescale the very thing being judged.
     """
 
-    output_device = "default"
     volume = 1.0
+
+    def __init__(self, device: str = "default"):
+        self.output_device = device
 
 
 def theme_at(themes, theme_id: str, level_dbfs: float) -> dict:
@@ -206,10 +236,18 @@ def main() -> int:
     parser.add_argument("--gap", type=float, default=0.55, help="seconds between sounds")
     parser.add_argument("--seed", type=int, default=None, help="fix the side shuffle")
     parser.add_argument("--reverb", default="smallRoom")
+    parser.add_argument("--device", default="default",
+                        help="OpenAL output device name; see --list-devices")
+    parser.add_argument("--list-devices", action="store_true")
     args = parser.parse_args()
 
     themes = _load("themes")
     player = _load("player")
+
+    if args.list_devices:
+        for name in list_devices(player):
+            print(name)
+        return 0
 
     print("Before you start:")
     print("  - Headphones on, and set your system volume ONCE, now.")
@@ -218,7 +256,7 @@ def main() -> int:
     print("    so neither can confound the level judgement.")
     print("  - Listener gain is unity: what you hear is the theme's own level.")
 
-    sound_player = player.OpenALSoundPlayer(UnitySettings())
+    sound_player = player.OpenALSoundPlayer(UnitySettings(args.device))
     try:
         sound_player.set_reverb(args.reverb)
         if args.mode == "tour":
