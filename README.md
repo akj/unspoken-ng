@@ -81,6 +81,16 @@ Only `name` affects what you see in the settings list. `gain` is a level trim in
 
 Build the NVDA addon using scons.  The addon bundles the official OpenAL Soft Windows x64 build (soft_oal.dll); no native code needs to be compiled.
 
+The addon itself has no dependencies — it runs on NVDA's own Python. The tooling does, and `pyproject.toml` groups it so [uv](https://docs.astral.sh/uv/) can fetch it on demand:
+
+```
+uv run --group build scons          # build the .nvda-addon
+uv run --group test  pytest tests/  # the off-NVDA suite
+uv run --group audio tools/soak_periods.py --self-test
+```
+
+`tools/` holds the listening rigs used to validate the audio pipeline; they need a real audio device and are not part of the build.
+
 ## Known Issues
 
 If you would like to fix any of these issues, pull requests will be happily and gratefully accepted:
