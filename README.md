@@ -77,6 +77,8 @@ gain = 0
 
 Only `name` affects what you see in the settings list. `gain` is a level trim in decibels, clamped to ±12, applied on top of the loudness normalisation the addon does across the whole theme — reach for it only if your theme sits noticeably louder or quieter than the default.
 
+**Level-match your slots.** The addon normalises a theme as a whole, deliberately preserving the balance you chose between its sounds. The cost is that one unusually loud file sets the ceiling for everything: if the theme cannot reach the target level without that file clipping, the addon quietly turns the whole theme down rather than distorting it, and every other sound gets quieter too. A theme whose slots sit within a few dB of each other reaches the intended loudness; one with a single hot slot will not.
+
 ## Building
 
 Build the NVDA addon using scons.  The addon bundles the official OpenAL Soft Windows x64 build (soft_oal.dll); no native code needs to be compiled.

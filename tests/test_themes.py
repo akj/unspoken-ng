@@ -393,31 +393,67 @@ def test_decode_24_bit_sample_vectors(encoded, expected):
     assert themes._decode_24_bit(encoded) == expected
 
 
-def test_clipping_logs_one_warning_per_theme(caplog):
-    decoded = {
+#: One very loud sample among a thousand silent ones: a huge peak that barely
+#: moves the pooled RMS, so normalizing to the reference level asks for far
+#: more gain than the waveform has headroom for. This is the shape of #57.
+_PEAKY_THEME = {
+    "button": themes._DecodedWav(
+        samples=[32767] + [0] * 999,
+        sample_width=2,
+        source_rate=22050,
+    ),
+    "link": themes._DecodedWav(
+        samples=[0] * 1000,
+        sample_width=2,
+        source_rate=22050,
+    ),
+}
+
+
+def test_a_peaky_theme_is_backed_off_rather_than_clipped(caplog):
+    """#57: the gain gives way, not the waveform."""
+    with caplog.at_level(logging.DEBUG, logger=themes.__name__):
+        processed = themes._process_theme(dict(_PEAKY_THEME), 0.0, "peaky-theme")
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        "backing the gain off should make the clipping warning unreachable"
+    )
+    assert any(
+        "backing its gain off" in record.getMessage() for record in caplog.records
+    ), "the backoff must be visible in the log, not silent"
+
+    peak = max(
+        abs(value)
+        for frames, _ in processed.values()
+        for value in struct.unpack(f"<{len(frames) // 2}h", frames)
+    )
+    assert peak == themes._OUTPUT_MAXIMUM, (
+        f"peak {peak} should sit exactly on the ceiling, neither over nor under"
+    )
+
+
+def test_the_backoff_is_only_as_deep_as_it_has_to_be():
+    """A theme with headroom keeps the reference level it asked for."""
+    roomy = {
         "button": themes._DecodedWav(
-            samples=[32767] + [0] * 999,
-            sample_width=2,
-            source_rate=22050,
-        ),
-        "link": themes._DecodedWav(
-            samples=[0] * 1000,
-            sample_width=2,
-            source_rate=22050,
+            samples=[-8000, 8000] * 500, sample_width=2, source_rate=22050
         ),
     }
+    processed = themes._process_theme(roomy, 0.0, "roomy-theme")
+    frames, _ = processed["button"]
+    values = struct.unpack(f"<{len(frames) // 2}h", frames)
+    rms = math.sqrt(sum((v / themes._OUTPUT_FULL_SCALE) ** 2 for v in values) / len(values))
+    assert 20.0 * math.log10(rms) == pytest.approx(themes._REFERENCE_RMS_DBFS, abs=0.05)
 
+
+def test_the_bundled_theme_does_not_clip_at_the_shipped_reference(caplog):
+    """The #57 regression itself, against the real assets."""
     with caplog.at_level(logging.WARNING, logger=themes.__name__):
-        themes._process_theme(decoded, 0.0, "clipping-theme")
+        processed = themes.load("default")
 
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING
-    ]
-    assert warnings == [
-        "Sound theme 'clipping-theme' clipped 1 samples; "
-        "peak overshoot 13.01 dB"
+    assert processed, "the bundled theme should load"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [
+        r.getMessage() for r in caplog.records
     ]
 
 
