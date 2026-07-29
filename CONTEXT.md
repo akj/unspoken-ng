@@ -17,7 +17,7 @@ The module that owns the playback protocol — interruption of the previous soun
 _Avoid_: playback manager, audio controller
 
 **Onset latency**:
-Time from the NVDA event (focus, navigation, mouse) to the first audible sample of the role sound. The pipeline's primary quality bar.
+Time from the NVDA event (focus, navigation, mouse) to the first audible sample of the role sound. The pipeline's primary quality bar on the object-event paths. On the reading path the bar is speech-sync instead: the sound fires when speech reaches the control (ADR 0002), so the budget there governs dispatch, not audibility.
 _Avoid_: lag, delay, response time
 
 **Sound theme**:

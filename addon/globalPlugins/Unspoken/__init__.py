@@ -9,8 +9,8 @@ things and nothing else:
 - **Wiring.** The config spec and its one-shot migration, the user sound-theme
   directory, the settings provider, the Sound Player, and -- because it is the
   thing that attempted the player and caught the failure -- degraded mode.
-- **Entry points.** Three object events, one speech-pipeline hook that plays,
-  and one that only suppresses.
+- **Entry points.** Three object events, one speech-pipeline hook that places
+  sounds into the speech stream, and one that only suppresses.
 - **The main-thread property reads.** `obj.role` and `obj.location`, once each,
   from the object the event handed us.
 - **Lifetime.** Everything patched here is unpatched in `terminate`.
@@ -30,6 +30,12 @@ invisible in the code that keeps them:
   sound is traceable to a synchronous call from NVDA (#31). The 100 ms
   navigation timer is gone; `event_becomeNavigatorObject` covers what it
   covered, and its `isFocus` flag replaces the timer's timing guess.
+- Reading-path sounds are timed by NVDA's speech indexes, not by us: the hook
+  returns a `CallbackCommand` in the field's speech sequence, and the speech
+  manager fires it on the main thread when the synth reaches the field
+  (ADR 0002, #52). #31's rule holds -- the synchronous call is the manager's
+  index handling instead of the hook. Position is still read in the hook,
+  where the property reads are legal and the field is current.
 - No desktop-size cache: `getDesktopObject().location` costs 0.002 ms (#28).
 - `player.play` is the only audio call on the path, and it returns in ~0.1 ms.
 """
@@ -44,10 +50,12 @@ import globalPluginHandler
 import globalVars
 import gui
 import speech
+import synthDriverHandler
 import textInfos
 import ui
 import wx
 from logHandler import log
+from speech.commands import CallbackCommand
 
 from . import migration, roles, spatial, themes, wiring
 from .player import NoAudioEndpointError, OpenALSoundPlayer, SilentSoundPlayer
@@ -167,6 +175,31 @@ def _synth_volume():
     except Exception:
         log.debugWarning("Unspoken: could not read the synth volume", exc_info=True)
         return None
+
+
+def _synth_reports_indexes():
+    """Does the current synth notify `synthIndexReached`?
+
+    A `CallbackCommand` is fired by the speech manager when the synth reports
+    reaching the index the manager converted it to; a synth that never reports
+    leaves it waiting forever -- NVDA has no timeout for it (say-all is just as
+    broken on such a synth, for the same reason). Every in-tree synth reports
+    indexes; this check exists for out-of-tree ones, and failing it falls back
+    to playing at build time.
+
+    Cost on the reading path: two attribute reads and a frozenset membership.
+    For a synth under the 32-bit bridge, `supportedNotifications` is cached on
+    the proxy, so no pipe round trip hides here.
+    """
+    try:
+        synth = synthDriverHandler.getSynth()
+        return (
+            synth is not None
+            and synthDriverHandler.synthIndexReached in synth.supportedNotifications
+        )
+    except Exception:
+        log.debugWarning("Unspoken: could not read the synth's notifications", exc_info=True)
+        return False
 
 
 def _user_themes_dir():
@@ -558,8 +591,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         subclass overrides this method anywhere in NVDA, and `getPropertiesSpeech`
         cannot serve: it receives only `role=role`, never the field.
 
-        The sound is placed before the original runs so the onset leads speech.
-        Whatever happens in our half, NVDA's speech is produced.
+        The sound is not played here. This hook runs when NVDA *builds* a
+        speech sequence, and on the reading path building and speaking are
+        decoupled: say-all queues lines ahead of the synth, and a line with
+        several controls builds all its fields in one pass -- played from
+        here, sounds fire seconds early and in bursts (#52). So the hook
+        returns the field's sequence with a `CallbackCommand` prepended, and
+        the sound fires when speech reaches the field (ADR 0002). Whatever
+        happens in our half, NVDA's speech is produced.
         """
         plugin = self
 
@@ -572,22 +611,36 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             extraDetail=False,
             reason=None,
         ):
-            try:
-                plugin._play_control_field(info, attrs, fieldType, reason)
-            except Exception:
-                log.debugWarning("Unspoken: reading-path hook failed", exc_info=True)
-            return original(
+            sequence = original(
                 info, attrs, ancestorAttrs, fieldType, formatConfig, extraDetail, reason
             )
+            try:
+                command = plugin._control_field_sound(info, attrs, fieldType, reason)
+                if command is not None:
+                    return [command, *sequence]
+            except Exception:
+                log.debugWarning("Unspoken: reading-path hook failed", exc_info=True)
+            return sequence
 
         return getControlFieldSpeech
 
-    def _play_control_field(self, info, attrs, fieldType, reason):
-        """Decide, then place. The decision is `wiring.should_play_control_field`.
+    def _control_field_sound(self, info, attrs, fieldType, reason):
+        """Decide, place, wrap. The decision is `wiring.should_play_control_field`.
 
         Everything handed to the predicate is a plain value, so the whole
         condition is table-tested off NVDA against #32's measured records
         (`tests/test_wiring.py`). Nothing here re-implements any part of it.
+
+        The position is read here, at build time -- the main thread, where the
+        property reads are legal and the field's identifiers are at hand. What
+        goes back to the hook is a `CallbackCommand` closing over the result;
+        the speech manager fires it, on this same thread, when the synth
+        reaches the field. An index from a cancelled utterance is dropped by
+        the manager, so interrupting speech drops the sounds of everything
+        never spoken -- while voices already in the air ring out (#10 d5).
+
+        `self._player` is resolved at fire time deliberately: a callback that
+        outlives `terminate` finds the `SilentSoundPlayer` and no-ops.
         """
         slot = roles.slot_for(attrs.get("role"))
         if not wiring.should_play_control_field(
@@ -596,10 +649,26 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             slot,
             _conf("silenceDuringSayAll"),
         ):
-            return
+            return None
         if _conf("roleAnnouncement") == "speechOnly":
-            return
-        self._player.play(slot, self._reading_position(info, attrs))
+            return None
+        position = self._reading_position(info, attrs)
+        if not _synth_reports_indexes():
+            # The callback would wait forever; play at build time instead,
+            # early bursts and all. 2.x behaviour, for a synth 2.x served.
+            self._player.play(slot, position)
+            return None
+
+        def _play():
+            # Inside the speech manager's index handling, not our hook's try.
+            # `play` returns in ~0.1 ms and does not raise, but this must be
+            # total regardless: an escape here breaks NVDA's speech pump.
+            try:
+                self._player.play(slot, position)
+            except Exception:
+                log.debugWarning("Unspoken: could not play a role sound", exc_info=True)
+
+        return CallbackCommand(_play, name=f"unspoken:{slot}")
 
     def _reading_position(self, info, attrs):
         """Spec section 5's position tiers. The sound plays either way.

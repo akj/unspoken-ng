@@ -102,13 +102,23 @@ Same page, Down Arrow through lines that contain links, buttons and checkboxes.
   control the caret is already inside; no sound at all on links (this path is
   the one that did not exist before 2.0).
 
+Arrow onto a line containing several controls (a row of the three-across
+control grid will do).
+
+- Pass: the sounds arrive **spread across the line's speech**, each as its
+  control is spoken — not as one burst when the line starts.
+- Fail: all the line's sounds at once at the start of the line (that is
+  build-time play returning — #52 / ADR 0002).
+
 ### 2.4 Quick navigation
 
 Press `k` repeatedly to jump between links.
 
-- Pass: one link sound per press, positioned at the link.
-- Fail: silence, or two sounds per press (a double fire between the hook and
-  `event_gainFocus`).
+- Pass: one link sound per press, positioned at the link, arriving **with**
+  the speech rather than ahead of it (reading-path sounds ride the speech
+  stream — ADR 0002).
+- Fail: silence; two sounds per press (a double fire between the hook and
+  `event_gainFocus`); or a lag behind speech long enough to feel detached.
 
 ### 2.5 Say all — sounds on
 
@@ -116,8 +126,19 @@ Ensure **Silence role sounds during say all** is unchecked. Press
 `NVDA+Down Arrow` on the test page.
 
 - Pass: sounds continue through the read, one per control encountered,
-  positioned. Speech is uninterrupted.
-- Fail: no sounds, or sounds that stutter the speech.
+  positioned, and **timed to speech**: an inline link's sound plays as the
+  link text is spoken, not when its line is queued. Speech is uninterrupted.
+- Fail: no sounds; sounds that stutter the speech; or sounds leading the
+  spoken control by more than about a second — say-all queues lines ahead of
+  the synth, so an early sound means build-time play is back (#52).
+
+Start the say all again and press Control a paragraph or so **before** an
+upcoming control.
+
+- Pass: no sound for controls speech never reached; anything already sounding
+  rings out naturally.
+- Fail: the sound of a control that was never spoken arriving after the
+  interrupt.
 
 ### 2.6 Say all — sounds silenced
 
