@@ -29,6 +29,14 @@ dropouts proves nothing if the detector cannot fire.
 
 `periods` is read once per process by OpenAL Soft, so `--compare` runs each
 config in its own subprocess rather than switching in place.
+
+`--device` sends both playback and loopback capture somewhere other than your
+ears -- `--list-devices` prints the names that will open. **Read the caveat
+before trusting a result from a virtual cable:** buffer behaviour is a property
+of the endpoint driver, so a soak on a virtual device measures that device, not
+the headphones you actually use. Routing away is right for developing the rig
+and wrong for answering #40. For the real answer, run it on the endpoint you
+listen on.
 """
 
 from __future__ import annotations
@@ -67,6 +75,11 @@ ENVELOPE_HOP_MS = 1.0
 #: Trimmed from each end before analysis: stream start-up and tear-down are not
 #: what this is asking about.
 EDGE_TRIM_SECONDS = 1.5
+#: Below this median carrier level the recording is silence, not a clean run.
+#: The carrier is played at 0.25 amplitude, so anything near zero means the
+#: loopback captured the wrong endpoint -- which would otherwise be reported as
+#: "dropouts none", the most dangerous possible false pass.
+NO_SIGNAL_LEVEL = 0.001
 
 
 def _load(name: str):
@@ -77,9 +90,38 @@ def _load(name: str):
     return module
 
 
+def list_devices(player) -> list[str]:
+    """Every output device OpenAL can see, by the exact name it wants back.
+
+    `alcOpenDevice` takes the name verbatim with no fuzzy matching (ADR 0001),
+    so guessing at a device string does not work -- this prints the ones that
+    will actually open.
+    """
+    import ctypes
+
+    dll_path = os.path.join(str(ADDON), "soft_oal.dll")
+    al = player._bind(ctypes.CDLL(dll_path))
+    pointer = al.alcGetString(None, player.ALC_ALL_DEVICES_SPECIFIER)
+    if not pointer:
+        return []
+    # A null-separated list terminated by an empty string, so walk it rather
+    # than taking string_at, which stops at the first device.
+    names = []
+    offset = 0
+    while True:
+        name = ctypes.string_at(pointer + offset)
+        if not name:
+            break
+        names.append(name.decode("utf-8", "replace"))
+        offset += len(name) + 1
+    return names
+
+
 class UnitySettings:
-    output_device = "default"
     volume = 1.0
+
+    def __init__(self, device: str = "default"):
+        self.output_device = device
 
 
 def make_carrier(seconds: float, rate: int, amplitude: float = 0.25) -> tuple[bytes, int]:
@@ -101,6 +143,14 @@ def make_carrier(seconds: float, rate: int, amplitude: float = 0.25) -> tuple[by
 # --- recording -------------------------------------------------------------
 
 
+_OPENAL_PREFIX = "OpenAL Soft on "
+
+
+def _strip_openal_prefix(name: str) -> str:
+    """OpenAL's device name minus its own branding, as Windows spells it."""
+    return name[len(_OPENAL_PREFIX):] if name.startswith(_OPENAL_PREFIX) else name
+
+
 def _recorder_available() -> bool:
     try:
         import numpy  # noqa: F401
@@ -113,7 +163,9 @@ def _recorder_available() -> bool:
 class LoopbackRecorder:
     """Records the default speaker's own output, in a background thread."""
 
-    def __init__(self):
+    def __init__(self, device: str = "default"):
+        self.device = device
+        self.captured_from = None
         self.frames = None
         self._stop = threading.Event()
         self._thread = None
@@ -128,7 +180,18 @@ class LoopbackRecorder:
             import numpy as np
             import soundcard as sc
 
-            speaker = sc.default_speaker()
+            # Loopback must follow playback. Capturing a different endpoint
+            # than the one being played to records silence, and silence looks
+            # exactly like a perfectly clean soak -- see the no-signal guard in
+            # describe().
+            if self.device == "default":
+                speaker = sc.default_speaker()
+            else:
+                # OpenAL reports "OpenAL Soft on Line 1 (Virtual Audio Cable)";
+                # Windows, and therefore soundcard, calls the same endpoint
+                # "Line 1 (Virtual Audio Cable)". One name, two spellings.
+                speaker = sc.get_speaker(_strip_openal_prefix(self.device))
+            self.captured_from = str(speaker.name)
             mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
             chunks = []
             with mic.recorder(samplerate=RECORD_RATE, channels=2) as rec:
@@ -246,7 +309,8 @@ def self_test() -> int:
 POST_RESET = re.compile(r"Post-reset: .*?(\d+)hz, (\d+) / (\d+) buffer")
 
 
-def soak(periods: int, minutes: float, stall: bool, record: bool) -> dict:
+def soak(periods: int, minutes: float, stall: bool, record: bool,
+         device: str = "default") -> dict:
     # Setting ALSOFT_CONF here would be pointless: `player._write_alsoft_conf`
     # writes its own config and overwrites the variable, hardcoding periods = 2
     # (and logging a warning that this is what just happened). So patch the
@@ -266,11 +330,11 @@ def soak(periods: int, minutes: float, stall: bool, record: bool) -> dict:
 
     recorder = None
     if record:
-        recorder = LoopbackRecorder()
+        recorder = LoopbackRecorder(device)
         recorder.start()
         time.sleep(1.0)
 
-    sound_player = player.OpenALSoundPlayer(UnitySettings())
+    sound_player = player.OpenALSoundPlayer(UnitySettings(device))
     started = time.monotonic()
     deadline = started + minutes * 60.0
     next_carrier = started
@@ -333,6 +397,8 @@ def soak(periods: int, minutes: float, stall: bool, record: bool) -> dict:
         result["dropouts"] = dropouts
         result["steady"] = steady
         result["recorded_seconds"] = len(frames) / RECORD_RATE
+        result["captured_from"] = recorder.captured_from
+        result["device"] = device
     return result
 
 
@@ -357,6 +423,15 @@ def describe(result: dict) -> None:
         return
     dropouts = result["dropouts"]
     print(f"  recorded        {result['recorded_seconds']:.0f} s")
+    if result.get("captured_from"):
+        print(f"  captured from   {result['captured_from']!r}")
+    if result.get("steady", 0.0) < NO_SIGNAL_LEVEL:
+        print(f"  NO SIGNAL       carrier level {result.get('steady', 0.0):.5f} is below")
+        print(f"                  {NO_SIGNAL_LEVEL} -- nothing was recorded, so this run")
+        print("                  says NOTHING about dropouts. Usual cause: the")
+        print("                  loopback captured a different endpoint than the")
+        print("                  one played to. Check --device against --list-devices.")
+        return
     if not dropouts:
         print("  dropouts        none")
         return
@@ -376,10 +451,18 @@ def main() -> int:
     parser.add_argument("--compare", action="store_true", help="run 2 and 3 in turn")
     parser.add_argument("--stall", action="store_true", help="block the caller periodically")
     parser.add_argument("--no-record", action="store_true", help="listening test only")
+    parser.add_argument("--device", default="default",
+                        help="OpenAL output device name; see --list-devices")
+    parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--self-test", action="store_true",
                         help="check the dropout detector against planted gaps")
     parser.add_argument("--_child", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.list_devices:
+        for name in list_devices(_load("player")):
+            print(name)
+        return 0
 
     if args.self_test:
         if not _recorder_available():
@@ -399,7 +482,8 @@ def main() -> int:
                   f"(OpenAL reads its config once per process) ---")
             proc = subprocess.run(
                 [sys.executable, __file__, "--_child", str(periods),
-                 "--periods", str(periods), "--minutes", str(args.minutes)]
+                 "--periods", str(periods), "--minutes", str(args.minutes),
+                 "--device", args.device]
                 + (["--stall"] if args.stall else [])
                 + (["--no-record"] if args.no_record else []),
             )
@@ -408,7 +492,7 @@ def main() -> int:
         print("#40's rule: if periods = 2 shows dropouts and 3 does not, ship 3.")
         return 0 if all(code == 0 for code in results) else 1
 
-    describe(soak(args.periods, args.minutes, args.stall, record))
+    describe(soak(args.periods, args.minutes, args.stall, record, args.device))
     return 0
 
 
