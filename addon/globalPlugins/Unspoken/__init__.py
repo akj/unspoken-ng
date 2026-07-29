@@ -30,12 +30,15 @@ invisible in the code that keeps them:
   sound is traceable to a synchronous call from NVDA (#31). The 100 ms
   navigation timer is gone; `event_becomeNavigatorObject` covers what it
   covered, and its `isFocus` flag replaces the timer's timing guess.
-- Reading-path sounds are timed by NVDA's speech indexes, not by us: the hook
-  returns a `CallbackCommand` in the field's speech sequence, and the speech
-  manager fires it on the main thread when the synth reaches the field
-  (ADR 0002, #52). #31's rule holds -- the synchronous call is the manager's
-  index handling instead of the hook. Position is still read in the hook,
-  where the property reads are legal and the field is current.
+- Reading-path timing splits by field (ADR 0002, #52): the field the
+  navigation landed inside plays at build time -- its utterance starts now,
+  so the sound leads speech like the object events' do -- while traversed
+  fields and everything under say-all return a `CallbackCommand` in the
+  field's speech sequence, fired by the speech manager on the main thread
+  when the synth reaches it. The split is `wiring.should_ride_speech`; #31's
+  rule holds either way -- the synchronous call is the hook or the manager's
+  index handling. Position is always read in the hook, where the property
+  reads are legal and the field is current.
 - No desktop-size cache: `getDesktopObject().location` costs 0.002 ms (#28).
 - `player.play` is the only audio call on the path, and it returns in ~0.1 ms.
 """
@@ -591,14 +594,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         subclass overrides this method anywhere in NVDA, and `getPropertiesSpeech`
         cannot serve: it receives only `role=role`, never the field.
 
-        The sound is not played here. This hook runs when NVDA *builds* a
-        speech sequence, and on the reading path building and speaking are
-        decoupled: say-all queues lines ahead of the synth, and a line with
-        several controls builds all its fields in one pass -- played from
-        here, sounds fire seconds early and in bursts (#52). So the hook
-        returns the field's sequence with a `CallbackCommand` prepended, and
-        the sound fires when speech reaches the field (ADR 0002). Whatever
-        happens in our half, NVDA's speech is produced.
+        This hook runs when NVDA *builds* a speech sequence, and on the
+        reading path building and speaking are decoupled: say-all queues lines
+        ahead of the synth, and a line with several controls builds all its
+        fields in one pass -- played from here, sounds fire seconds early and
+        in bursts (#52). So `_control_field_sound` plays at build time only
+        for the field the navigation landed inside (whose utterance starts
+        now); for everything else it hands back a `CallbackCommand`, prepended
+        here to the field's sequence, and the sound fires when speech reaches
+        the field (ADR 0002). Whatever happens in our half, NVDA's speech is
+        produced.
         """
         plugin = self
 
@@ -632,19 +637,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         (`tests/test_wiring.py`). Nothing here re-implements any part of it.
 
         The position is read here, at build time -- the main thread, where the
-        property reads are legal and the field's identifiers are at hand. What
-        goes back to the hook is a `CallbackCommand` closing over the result;
-        the speech manager fires it, on this same thread, when the synth
-        reaches the field. An index from a cancelled utterance is dropped by
-        the manager, so interrupting speech drops the sounds of everything
-        never spoken -- while voices already in the air ring out (#10 d5).
+        property reads are legal and the field's identifiers are at hand. Then
+        `wiring.should_ride_speech` splits the timing: the field the
+        navigation just landed inside plays now, leading speech the way the
+        object events do, and everything else goes back to the hook as a
+        `CallbackCommand` closing over `(slot, position)`; the speech manager
+        fires it, on this same thread, when the synth reaches the field. An
+        index from a cancelled utterance is dropped by the manager, so
+        interrupting speech drops the sounds of everything never spoken --
+        while voices already in the air ring out (#10 d5).
 
         `self._player` is resolved at fire time deliberately: a callback that
         outlives `terminate` finds the `SilentSoundPlayer` and no-ops.
         """
+        reason_name = getattr(reason, "name", None)
         slot = roles.slot_for(attrs.get("role"))
         if not wiring.should_play_control_field(
-            getattr(reason, "name", None),
+            reason_name,
             fieldType,
             slot,
             _conf("silenceDuringSayAll"),
@@ -653,9 +662,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if _conf("roleAnnouncement") == "speechOnly":
             return None
         position = self._reading_position(info, attrs)
-        if not _synth_reports_indexes():
-            # The callback would wait forever; play at build time instead,
-            # early bursts and all. 2.x behaviour, for a synth 2.x served.
+        if not wiring.should_ride_speech(reason_name, fieldType) or not _synth_reports_indexes():
+            # Leads: the utterance announcing this field starts now. Or the
+            # fallback: a synth that never reports indexes would leave the
+            # callback waiting forever, so play at build time, bursts and all.
             self._player.play(slot, position)
             return None
 

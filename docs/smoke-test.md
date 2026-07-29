@@ -106,7 +106,9 @@ Arrow onto a line containing several controls (a row of the three-across
 control grid will do).
 
 - Pass: the sounds arrive **spread across the line's speech**, each as its
-  control is spoken — not as one burst when the line starts.
+  control is spoken — not as one burst when the line starts. (A control the
+  caret lands *inside* — one starting the line — may rightly sound at once;
+  it is the controls further along the line that must wait their turn.)
 - Fail: all the line's sounds at once at the start of the line (that is
   build-time play returning — #52 / ADR 0002).
 
@@ -114,11 +116,11 @@ control grid will do).
 
 Press `k` repeatedly to jump between links.
 
-- Pass: one link sound per press, positioned at the link, arriving **with**
-  the speech rather than ahead of it (reading-path sounds ride the speech
-  stream — ADR 0002).
+- Pass: one link sound per press, positioned at the link, **immediately** —
+  the jumped-into field leads speech like a focus change does (ADR 0002).
 - Fail: silence; two sounds per press (a double fire between the hook and
-  `event_gainFocus`); or a lag behind speech long enough to feel detached.
+  `event_gainFocus`); or the sound waiting for the speech to start — that
+  sluggishness is the entered-field split failing.
 
 ### 2.5 Say all — sounds on
 

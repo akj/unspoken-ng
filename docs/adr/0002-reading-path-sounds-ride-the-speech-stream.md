@@ -1,11 +1,21 @@
 # Reading-path sounds ride the speech stream
 
 The reading path (`TextInfo.getControlFieldSpeech` — browse-mode reading, quicknav, say-all,
-the Word caret) no longer plays at hook time. The hook prepends a `speech.commands.CallbackCommand`
-to the field's returned speech sequence; NVDA's speech manager converts it to a synth index and
-fires it on the main thread when the synthesizer **reaches** the field. Position extraction stays
-in the hook, at build time, on the main thread; the callback closes over `(slot, position)` and
-calls `play`, which returns in ~0.1 ms.
+the Word caret) no longer plays every sound at hook time. The field the navigation just landed
+**inside** still plays there — its utterance starts immediately, so the sound leads speech the
+way the object events' do. Every other field's sound goes into the field's returned speech
+sequence as a `speech.commands.CallbackCommand`; NVDA's speech manager converts it to a synth
+index and fires it on the main thread when the synthesizer **reaches** the field. Position
+extraction always stays in the hook, at build time, on the main thread; the callback closes over
+`(slot, position)` and calls `play`, which returns in ~0.1 ms.
+
+The split needs no utterance tracking, because `fieldType` already encodes it:
+`start_addedToControlFieldStack` is a field the reading position landed inside, announced at the
+head of an utterance that — under `CARET` and `QUICKNAV`, which cancel current speech — begins
+now. `start_relative` is a field speech traverses mid-utterance. Under `SAYALL` even the
+utterance start sits behind the read-ahead queue, so there everything rides. The predicate is
+`wiring.should_ride_speech`, table-tested against the #32 dataset: of its 113 plays, 84 lead
+and 29 ride.
 
 The trigger was the first 2.0 smoke run (#52): a link's sound played seconds before say-all's
 speech reached the link, and a table row with several controls fired every sound in one burst.
@@ -19,8 +29,9 @@ immediately; they are unchanged, and their sounds still lead speech.
 our side)" was decided with the object-event model in mind, and its premise is false for the
 reading path: the speech manager's index machinery is exactly that observation point —
 `BaseCallbackCommand`s become `IndexCommand`s, `synthIndexReached` queues the handler onto the
-main thread, and say-all's own read-ahead is built on it. The ordering contract splits:
-**object-event sounds lead speech; reading-path sounds ride it.**
+main thread, and say-all's own read-ahead is built on it. The ordering contract becomes:
+**sounds announcing where the user just arrived lead speech — object events and entered fields
+alike; sounds announcing content speech is traversing ride it.**
 
 ## Considered options
 
@@ -33,24 +44,27 @@ moment, which for a replacement of speech is wrongness, not lateness.
 schedule the sound. Rejected without measurement: it reintroduces the timers #31 deleted, and it
 guesses at a pipeline NVDA will simply tell us about.
 
-**Hybrid: play the navigation target immediately, callbacks for the rest.** Preserves the
-sound-leads-speech onset on quicknav while fixing say-all and bursts. Rejected for now: the hook
-sees fields, not utterances, so "first field of this utterance" needs utterance-boundary tracking
-that does not currently exist on this path. Revisit if riding speech feels sluggish on quicknav
-in smoke testing — the callback approach does not foreclose it.
+**Callbacks for everything.** The first cut of this change, and NVDA's designed mechanism for
+"when speech reaches here": no timers of ours, no polling, nothing on the hot path beyond
+constructing one small command object; #31's rule that every sound is traceable to a synchronous
+NVDA call still holds — the call is the manager's index handling instead of the hook. Rejected
+on its first live trial: navigation in web browsers felt sluggish, because even the field the
+user just jumped into waited out the synth's time-to-first-audio (~50–150 ms) where it used to
+sound ~20 ms after the keypress.
 
-**Callback in the sequence (chosen).** NVDA's designed mechanism for "when speech reaches here".
-No timers of ours, no polling, nothing on the hot path beyond constructing one small command
-object; #31's rule that every sound is traceable to a synchronous NVDA call still holds — the
-call is the manager's index handling instead of the hook.
+**Hybrid: entered fields play immediately, callbacks for the rest (chosen).** Preserves the
+sound-leads-speech onset where the sound answers a keypress, and rides speech where the sound
+annotates content being read out. Initially dismissed on the belief that "first field of this
+utterance" required utterance-boundary tracking the hook cannot see — wrongly: `fieldType`
+already carries the distinction (above), so the split is a two-argument pure predicate.
 
 ## Consequences
 
-- **Reading-path sounds arrive with speech, not ahead of it.** On quicknav the sound now onsets
-  with the synth's first audio (~50–150 ms after keypress, synth-dependent) instead of ~20 ms.
-  Accepted: coinciding with the element being spoken is the announcement doing its job. The
-  event→`play()` dispatch budget (§2) is untouched — dispatch now ends at command construction,
-  and the play itself is 0.09 ms at fire time.
+- **Traversed-field sounds arrive with speech, not ahead of it** — coinciding with the element
+  being spoken is that announcement doing its job. Entered fields keep the ~20 ms
+  post-keypress onset on quicknav and caret navigation. The event→`play()` dispatch budget (§2)
+  is untouched on every branch — for riding sounds, dispatch ends at command construction and
+  the play itself is 0.09 ms at fire time.
 - **Interrupting speech drops unspoken sounds.** Indexes from cancelled utterances are discarded
   by the manager, so content never spoken is never sounded — previously an interrupted say-all
   had already fired sounds for text the user never heard. #10 decision 5 is refined, not
