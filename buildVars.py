@@ -27,7 +27,7 @@ addon_info = {
 	# Documentation file name
 	"addon_docFileName" : "readme.html",
 	"addon_minimum_nvda_version" : "2026.1",
-	"addon_last_tested_nvda_version" : "2026.1",
+	"addon_last_tested_nvda_version" : "2026.3",
 }
 
 
