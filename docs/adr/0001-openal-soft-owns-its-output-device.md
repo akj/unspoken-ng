@@ -42,17 +42,33 @@ crash, a device-follow split across the boundary, and two artifacts to build, pa
 
 ## Consequences
 
-- **The Sound Player seam is commands over opaque handles** — `play(slot, position) -> voice`,
-  `move(voice, position)`, `stop(voice)` — with no callbacks into Python and no shared buffers.
-  That API is already command-shaped, so the constraint is close to free, and it keeps a later
-  retreat behind a process boundary a relocation rather than a redesign.
+- **The Sound Player seam is fire-and-forget commands** — `play(slot, position)`,
+  `set_theme(sounds)`, `set_reverb(preset)`, `close()` — with no callbacks into Python, no shared
+  buffers, and no handles. That API is already command-shaped, so the constraint is close to free,
+  and it keeps a later retreat behind a process boundary a relocation rather than a redesign.
+
+  *Amended by #25, which pinned the signatures.* This bullet originally read `play(slot, position)
+  -> voice`, `move(voice, position)`, `stop(voice)`, over opaque handles. `move` was called
+  load-bearing here — fire at dispatch, position when COM extraction completes — and the sound
+  durations refute it: the bundled slots run 11–492 ms against 60–170 ms measured extraction, so
+  for 10 of 14 slots the sound is over before the position arrives, and the four still ringing
+  would be spatially wrong for their first third and then jump. Position is therefore resolved
+  *before* the voice exists. With `move` gone, `stop` was the handle's only remaining use and it
+  has no caller: in-flight voices are never cut (#10), voice-stealing is internal to the source
+  pool, the suppression settings stop sounds from *starting*, and teardown is `close()`. So `play`
+  returns nothing. This **strengthens** the reasoning above rather than weakening it — a `play`
+  returning a handle is the one shape that would force a synchronous round trip across a future
+  process boundary, on the latency path.
 - **There is no fallback output path.** When the owned stream cannot open, the addon has nowhere to
   fall back to, so the failure and degraded-mode behaviour must be specified deliberately.
 - **The buffer is the one latency knob**, and it works 1:1 with onset. `ALSOFT_CONF`
   `[general] periods = 2` yields a 22 ms buffer — the floor, since the backend clamps 960 frames up
   to 1056 — against 32 ms at the default of 3. `ALC_REFRESH` is ignored; the 10 ms period is pinned
   by WASAPI shared mode. The addon must write `ALSOFT_CONF` into `os.environ` *before* the DLL
-  loads, which constrains module initialisation order.
+  loads. (#25 found this imposes no import-order rule on anything else: the player's constructor
+  writes the env var immediately before its own `ctypes.CDLL` call, so the constraint is satisfied
+  inside one module. The variable is process-global, though — another addon loading OpenAL Soft in
+  the same NVDA inherits our config file.)
 - **`alcReopenDeviceSOFT` blocks for 31–470 ms** and must never run on NVDA's main thread.
 - **The loopback justification is discharged.** `openal_audio.py`'s docstring defends loopback as
   "preserving NVDA ducking and device routing"; ducking no longer applies on any branch, and device
