@@ -9,7 +9,7 @@ The audio cue mapped from an NVDA control role (button, checkbox, link, …).
 _Avoid_: sound effect, earcon
 
 **Sound Player**:
-The module below the seam, and the only one that knows OpenAL exists (`player.py`). It owns the device, the voice pool, reverb, and rendering a role sound at a position. Its interface is four fire-and-forget commands — `play(slot, position)`, `set_theme(sounds)`, `set_reverb(preset)`, `close()` — with no return handles, no callbacks into Python, and no shared buffers (ADR 0001 as amended by #25). `play` returns in ~0.1 ms; `set_theme` and `set_reverb` affect the next voice. Two adapters implement it: the OpenAL one and a silent one, used for degraded mode and off-NVDA tests.
+The module below the seam, and the only one that knows OpenAL exists (`player.py`). It owns the device, the voice pool, reverb, and rendering a role sound at a position. Its interface is four fire-and-forget commands — `play(slot, position)`, `set_theme(sounds)`, `set_reverb(preset)`, `close()` — with no return handles, no callbacks into Python, and no shared buffers (ADR 0003). `play` returns in ~0.1 ms; `set_theme` and `set_reverb` affect the next voice. Two adapters implement it: the OpenAL one and a silent one, used for degraded mode and off-NVDA tests.
 _Avoid_: audio engine, backend, mixer, playback manager, audio controller, audio service
 
 **Voice**:
@@ -17,7 +17,7 @@ One playing instance of a role sound — an OpenAL source drawn from a fixed poo
 _Avoid_: channel, source, handle, playing sound
 
 **Position**:
-Where a role sound is placed, as a listener-relative unit vector — +x right, +y up, -z forward, distance fixed at 1 (`spatial.position_for`). Mapped from the control's screen rectangle against the desktop rectangle, and always resolved on the main thread *before* the voice exists: #25 dropped the two-phase `move` interface because most role sounds (11–492 ms) end before COM extraction (60–170 ms) could correct them. The addon hands the player positions, not angles.
+Where a role sound is placed, as a listener-relative unit vector — +x right, +y up, -z forward, distance fixed at 1 (`spatial.position_for`). Mapped from the control's screen rectangle against the desktop rectangle, and always resolved on the main thread *before* the voice exists: ADR 0003 dropped the two-phase `move` interface because most role sounds (11–492 ms) end before COM extraction could correct them. The addon hands the player positions, not angles.
 _Avoid_: coordinates, location, panning, 3D vector
 
 **Onset latency**:
