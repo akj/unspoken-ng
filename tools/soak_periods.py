@@ -16,15 +16,16 @@ The carrier is noise rather than a tone on purpose: overlapping tone voices
 interfere and can null out, which reads as a dropout that never happened.
 Independent noise segments sum without nulls.
 
-    python tools/soak_periods.py --compare --minutes 5     # 2 vs 3, the answer
-    python tools/soak_periods.py --periods 2 --minutes 10  # one config, longer
-    python tools/soak_periods.py --periods 2 --stall       # + main-thread stalls
+    uv run --group audio tools/soak_periods.py --self-test        # trust it first
+    uv run --group audio tools/soak_periods.py --compare --minutes 5
+    uv run --group audio tools/soak_periods.py --periods 2 --stall
 
-Automated detection needs `numpy` and `soundcard`. Without them this still runs
-as a listening test and says so. On this machine the interpreter that has them
-is the one the spike rigs use:
+Automated detection needs `numpy` and `soundcard`, which is what the `audio`
+dependency group in `pyproject.toml` is for. Run it under a plain `python` with
+neither installed and it degrades to a listening test and says so.
 
-    C:\\Users\\andrew\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe
+Run `--self-test` before believing a clean result: a soak that reports no
+dropouts proves nothing if the detector cannot fire.
 
 `periods` is read once per process by OpenAL Soft, so `--compare` runs each
 config in its own subprocess rather than switching in place.

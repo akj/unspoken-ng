@@ -1,0 +1,37 @@
+# Development tooling only.
+#
+# THE ADDON ITSELF HAS NO DEPENDENCIES. It runs inside NVDA's bundled Python
+# and uses nothing but the standard library and ctypes against the bundled
+# soft_oal.dll. Nothing declared here is installed into, required by, or
+# present in the built .nvda-addon -- `sconstruct` builds the bundle from
+# `addon/` alone. Do not add a runtime dependency here expecting it to ship.
+#
+# Groups:
+#   test    what CI's test job runs
+#   build   what CI's package job runs
+#   audio   the HITL rigs in tools/, which need a real audio device
+#
+#   uv run --group test  pytest tests/
+#   uv run --group build scons
+#   uv run --group audio tools/soak_periods.py --self-test
+#
+# tests/test_tooling.py checks these pins against .github/workflows/ci.yml, so
+# the two cannot drift apart silently.
+
+[project]
+name = "unspoken-ng"
+version = "2.0"
+description = "Development tooling for the unspoken-ng NVDA addon (not the addon itself)"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+test = ["pytest==9.1.1"]
+build = ["SCons==4.10.1", "Markdown==3.10.2"]
+# Unpinned on purpose: these drive a listening rig on the operator's own
+# hardware, not a reproducible build, and soundcard tracks Windows audio APIs.
+# CI never installs this group -- its runners have no audio device.
+audio = ["numpy>=2", "soundcard>=0.4"]

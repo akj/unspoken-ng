@@ -14,9 +14,11 @@ times as it takes.
 Runs outside NVDA, against the addon's own `themes.py` and `player.py` and the
 bundled `soft_oal.dll`. Standard library only -- no numpy, no NVDA.
 
-    python tools/audition_loudness.py                  # A/B the candidates
-    python tools/audition_loudness.py --mode tour      # hear one level, all slots
-    python tools/audition_loudness.py --mode upgrade   # 1.x level vs the default
+    uv run tools/audition_loudness.py                 # A/B the candidates
+    uv run tools/audition_loudness.py --mode tour     # one level, all slots
+    uv run tools/audition_loudness.py --mode upgrade  # 1.x level vs the default
+
+Standard library only -- no dependency group needed, unlike the soak next door.
 
 Console-only and line-based on purpose: it has to be usable with a screen
 reader, so there is no curses UI, no cursor positioning and no colour.
