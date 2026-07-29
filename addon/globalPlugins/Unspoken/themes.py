@@ -441,6 +441,8 @@ def _process_theme(
         log.info("Sound theme %r is silent; skipping RMS normalization", theme_id)
         gain_factor = 1.0
 
+    gain_factor = _limit_to_full_scale(decoded, gain_factor, theme_id)
+
     processed = {}
     clipped_sample_count = 0
     peak_overshoot_ratio = 1.0
@@ -472,6 +474,54 @@ def _process_theme(
             peak_overshoot_db,
         )
     return processed
+
+
+def _limit_to_full_scale(
+    decoded: dict[str, _DecodedWav],
+    gain_factor: float,
+    theme_id: str,
+) -> float:
+    """Back the theme gain off if the loudness target would not fit (#57).
+
+    A loudness target and a full-scale ceiling cannot both be honoured by a
+    theme without the crest headroom to reach the target: something has to
+    give. Backing the gain off is strictly better than clipping, which
+    truncates the waveform and distorts audibly, so the reference level is an
+    upper bound rather than a promise.
+
+    This is the addon's business rather than the theme author's, because it is
+    the pooled normalization that creates the overshoot: one hot slot lifts the
+    whole theme's peak while barely moving its RMS. The bundled theme is the
+    worked example -- `combobox.wav` sits ~13 dB above the set's median, and at
+    the shipped -20 dBFS reference it took four slots over full scale.
+
+    The bound is `_OUTPUT_MAXIMUM`, not `_OUTPUT_FULL_SCALE`: two's complement
+    has one more code below zero than above it, and rounding a peak that landed
+    exactly on full scale would clip the positive side by one.
+    """
+    peak_ratio = 0.0
+    for wav in decoded.values():
+        source_full_scale = float(1 << (wav.sample_width * 8 - 1))
+        for sample in wav.samples:
+            magnitude = abs(sample) / source_full_scale
+            if magnitude > peak_ratio:
+                peak_ratio = magnitude
+
+    if peak_ratio <= 0.0:
+        return gain_factor
+
+    ceiling = _OUTPUT_MAXIMUM / _OUTPUT_FULL_SCALE
+    headroom = ceiling / (peak_ratio * gain_factor)
+    if headroom >= 1.0:
+        return gain_factor
+
+    log.info(
+        "Sound theme %r would peak %.2f dB over full scale at the reference "
+        "level; backing its gain off by that much instead of clipping",
+        theme_id,
+        -20.0 * math.log10(headroom),
+    )
+    return gain_factor * headroom
 
 
 def _encode_samples(samples: list[int]) -> bytes:
