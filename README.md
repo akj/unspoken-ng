@@ -91,7 +91,7 @@ uv run --group test  pytest tests/  # the off-NVDA suite
 uv run --group audio tools/soak_periods.py --self-test
 ```
 
-`tools/` holds the listening rigs used to validate the audio pipeline; they need a real audio device and are not part of the build.
+`tools/` holds the listening rigs used to validate the audio pipeline; they need a real audio device and are not part of the build. Their outcomes are recorded on [#40](https://github.com/akj/unspoken-ng/issues/40): the 22 ms (`periods = 2`) buffer default survived its glitch soak, while the −20 dBFS reference loudness that theme normalisation targets is provisional pending a listening re-audition — with the bundled theme's clipping backoff it plays around −22.6 dBFS effective, still roughly 13.6 dB hotter than the 1.x chain. Retuning the reference later is free, since the constant is invisible to users and theme authors.
 
 ## Releasing
 
