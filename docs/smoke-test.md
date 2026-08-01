@@ -57,8 +57,8 @@ will do — the inventory is what the steps below need, not the file:
 - Pass: exactly four controls, in order — Sound theme, Role announcement,
   Reverb, Silence role sounds during say all. Tab reaches each one and NVDA
   announces its label.
-- Fail: any twelfth-control leftover, an unlabelled control, or focus landing
-  somewhere other than the category list when the dialog opens.
+- Fail: any leftover control from the pre-rebuild panel, an unlabelled control,
+  or focus landing somewhere other than the category list when the dialog opens.
 
 ---
 
@@ -198,8 +198,8 @@ Set **Role announcement** to each value in turn and Tab through a dialog.
   One known exception, accepted and recorded in `wiring.py` beside
   `PLAY_FIELD_TYPES`: a **single-line** editable field that NVDA announces
   through `speakWithinForLine` is suppressed with no sound. It did not occur
-  anywhere in the #32 measurement run. If you hit it, note it — it is a known
-  cost awaiting a spec §13 amendment, not a new failure.
+  anywhere in the #32 measurement run. If you hit it, note it — it is a known,
+  accepted cost, not a new failure.
 
 ---
 
@@ -254,7 +254,7 @@ settings, unplug it while navigating.
 **4.2 Replug.** Plug it back in.
 
 - Pass: role sounds return, on the reconnected device, without restarting NVDA.
-  The first sound after the change may be lost — that is accepted (spec §13).
+  The first sound after the change may be lost — that is accepted (ADR 0003).
 - Fail: silence until restart.
 
 **4.3 Default device moves.** With NVDA's output device set to the system
