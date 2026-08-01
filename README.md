@@ -93,6 +93,10 @@ uv run --group audio tools/soak_periods.py --self-test
 
 `tools/` holds the listening rigs used to validate the audio pipeline; they need a real audio device and are not part of the build.
 
+## Releasing
+
+Publish a GitHub release whose tag is the bare version, no `v` prefix (e.g. `2.1`, matching the NVDA add-on store's `X.Y` convention) — that's the whole process. The addon version is stamped from `git describe --tags` at build time, so the tag *is* the version: CI rebuilds the addon from the tag — running the test suite and artifact verification first — and attaches the `.nvda-addon` to the release. Nothing is bumped, built, or uploaded by hand; local builds between tags get a version like `2.0-51-g3b71875`.
+
 ## Known Issues
 
 If you would like to fix any of these issues, pull requests will be happily and gratefully accepted:

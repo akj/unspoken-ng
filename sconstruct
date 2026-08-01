@@ -184,6 +184,10 @@ env.Depends(mergePot, i18nFiles)
 manifest = env.NVDAManifest(os.path.join("addon", "manifest.ini"), os.path.join("manifest.ini.tpl"))
 # Ensure manifest is rebuilt if buildVars is updated.
 env.Depends(manifest, "buildVars.py")
+# addon_version comes from `git describe` at buildVars import time. That value is
+# not captured by the content signature of buildVars.py, so without an explicit
+# dependency SCons caches a stale version in manifest.ini when HEAD moves.
+env.Depends(manifest, env.Value(buildVars.addon_info["addon_version"]))
 
 env.Depends(addon, manifest)
 env.Default(addon)

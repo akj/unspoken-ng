@@ -37,3 +37,5 @@ target/
 # uv resolves tooling from the pins in pyproject.toml; CI does not consume a
 # lockfile, so tracking one would be a file to maintain with no reader.
 uv.lock
+
+addon/manifest.ini

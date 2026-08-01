@@ -22,7 +22,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 README = (REPO / "README.md").read_text(encoding="utf-8")
 CONTEXT = (REPO / "CONTEXT.md").read_text(encoding="utf-8")
-MANIFEST = (REPO / "addon" / "manifest.ini").read_text(encoding="utf-8")
+BUILD_VARS = (REPO / "buildVars.py").read_text(encoding="utf-8")
 ADR_DIR = REPO / "docs" / "adr"
 
 
@@ -96,10 +96,14 @@ def test_the_bundled_theme_has_the_manifest_the_readme_describes():
 # --- version floor ---------------------------------------------------------
 
 
-def test_readme_version_floor_matches_the_manifest():
-    minimum = re.search(r"minimumNVDAVersion\s*=\s*(\S+)", MANIFEST).group(1)
+def test_readme_version_floor_matches_the_build_vars():
+    # buildVars.py, not the generated addon/manifest.ini: the manifest is
+    # build output and does not exist on a fresh checkout.
+    minimum = re.search(
+        r'"addon_minimum_nvda_version"\s*:\s*"([^"]+)"', BUILD_VARS
+    ).group(1)
     assert f"NVDA {minimum} or later" in README, (
-        f"manifest requires {minimum}; README does not say so"
+        f"buildVars requires {minimum}; README does not say so"
     )
 
 
