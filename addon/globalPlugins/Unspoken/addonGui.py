@@ -74,14 +74,11 @@ _DEFAULT_THEME_ID = settings.DEFAULTS["theme"]
 def build_theme_choices(discovered_themes):
 	"""Return the (labels, IDs) pair for the sound theme combo box.
 
-	Discovery only comes up empty if the bundled default theme is unusable, and
-	an empty combo box is a dead end for a keyboard user, so the panel still
-	offers the bundled default in that case.
+	Discovery is never empty: the sound theme library always offers the bundled
+	default, even when the bundled default itself is unreadable, so there is
+	nothing for the panel to synthesise (#66).
 	"""
 
-	if not discovered_themes:
-		# Translators: The name of the bundled default sound theme.
-		return ([_("Default")], [_DEFAULT_THEME_ID])
 	return (
 		[theme.name for theme in discovered_themes],
 		[theme.id for theme in discovered_themes],
@@ -138,15 +135,16 @@ def reverb_value_for_index(index):
 
 
 class SettingsPanel(gui.settingsDialogs.SettingsPanel):
+	#: Bound by `register` onto the class NVDA constructs; see its docstring.
+	_themes = None
+
 	# Translators: The title of this add-on's category in NVDA's settings dialog.
 	title = _("Unspoken-ng")
 
 	def makeSettings(self, settingsSizer):
-		from . import themes
-
 		self._priorSettings = self._readSettings()
 
-		theme_labels, self._themeIds = build_theme_choices(themes.discover())
+		theme_labels, self._themeIds = build_theme_choices(self._themes.discover())
 		role_labels = [label for value, label in ROLE_ANNOUNCEMENT_CHOICES]
 		reverb_labels = [label for value, label in REVERB_CHOICES]
 
@@ -267,3 +265,36 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 
 	def _selectedReverbPreset(self):
 		return reverb_value_for_index(self.reverbChoice.GetSelection())
+
+
+def register(*, themes):
+	"""Give NVDA a settings panel bound to the collaborators it needs.
+
+	NVDA constructs the panel itself, from a class it holds in
+	`categoryClasses`, so the panel's collaborators cannot arrive through
+	`__init__`. They arrive as attributes of a class made for this registration
+	-- which is also what makes unregistering sufficient teardown: the bindings
+	live and die with the class object, there is nothing to restore by identity,
+	and a plugin reload registers a new class rather than rebinding state under
+	the old one's feet.
+
+	`themes` is a `themes.SoundThemeLibrary`; the panel asks it for `discover()`
+	and nothing else, and takes its answer as final.
+
+	Returns the class to hand back to `unregister`.
+	"""
+
+	class UnspokenSettingsPanel(SettingsPanel):
+		pass
+
+	UnspokenSettingsPanel._themes = themes
+	gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(UnspokenSettingsPanel)
+	return UnspokenSettingsPanel
+
+
+def unregister(panel_class):
+	"""Take the panel back out of NVDA's settings dialog. Total."""
+	try:
+		gui.settingsDialogs.NVDASettingsDialog.categoryClasses.remove(panel_class)
+	except Exception:
+		pass

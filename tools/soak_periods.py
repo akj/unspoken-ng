@@ -324,7 +324,7 @@ def soak(periods: int, minutes: float, stall: bool, record: bool,
     player = _load("player")
     player.ALSOFT_CONF_BODY = f"[general]\nperiods = {periods}\n"
 
-    sounds = themes.load("default")
+    sounds = themes.SoundThemeLibrary(themes.BUNDLED_THEMES_DIR, None).load("default")
     sounds[CARRIER_SLOT] = make_carrier(CARRIER_SECONDS, CARRIER_RATE)
     role_slots = [s for s in sorted(sounds) if s != CARRIER_SLOT]
 

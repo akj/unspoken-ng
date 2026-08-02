@@ -16,10 +16,10 @@ class Debounce:
 
     The settings panel applies a sound theme live so the user hears the choice
     while arrowing through the combo box -- which means the hook is called once
-    per keypress. `themes.load()` decodes fourteen WAVs sample by sample in
-    pure Python: about 20 ms for the bundled default, linear in the theme's
-    size. Per keypress that is a 20 ms stall on the thread NVDA speaks from;
-    once, after the user settles, it is a stall while nothing is being
+    per keypress. `SoundThemeLibrary.load()` decodes fourteen WAVs sample by
+    sample in pure Python: about 20 ms for the bundled default, linear in the
+    theme's size. Per keypress that is a 20 ms stall on the thread NVDA speaks
+    from; once, after the user settles, it is a stall while nothing is being
     announced.
 
     `schedule(delay_ms, callback)` returns a handle with a `Stop()` method --

@@ -42,6 +42,18 @@ class _Conf(dict):
 		self.spec = {} if spec is None else spec
 
 
+class _FakeLibrary:
+	"""The panel's whole view of the sound theme library: one call."""
+
+	def __init__(self, themes):
+		self.themes = list(themes)
+		self.discoveries = 0
+
+	def discover(self):
+		self.discoveries += 1
+		return list(self.themes)
+
+
 class _FakeChoice:
 	"""Stands in for wx.Choice: a selection, and event handlers by event type."""
 
@@ -121,7 +133,10 @@ def _addon_gui(conf=None):
 	wx_stub.EVT_CHOICE = object()
 
 	gui_stub = ModuleType("gui")
-	gui_stub.settingsDialogs = SimpleNamespace(SettingsPanel=object)
+	gui_stub.settingsDialogs = SimpleNamespace(
+		SettingsPanel=object,
+		NVDASettingsDialog=SimpleNamespace(categoryClasses=[]),
+	)
 	gui_stub.guiHelper = SimpleNamespace(BoxSizerHelper=_FakeBoxSizerHelper)
 
 	config_stub = ModuleType("config")
@@ -170,24 +185,20 @@ def addon_gui():
 		yield module
 
 
-def _make_panel(module, themes=None):
-	"""Build the panel, optionally against a fixed set of discovered themes."""
-
-	if themes is not None:
-		themes_module = importlib.import_module(f"{module.__package__}.themes")
-		original_discover = themes_module.discover
-		themes_module.discover = lambda: list(themes)
-	panel = module.SettingsPanel.__new__(module.SettingsPanel)
-	try:
-		panel.makeSettings(object())
-	finally:
-		if themes is not None:
-			themes_module.discover = original_discover
-	return panel
-
-
 def _theme(theme_id, name):
 	return SimpleNamespace(id=theme_id, name=name)
+
+
+_ONE_BUNDLED_THEME = (_theme("default", "Default"),)
+
+
+def _make_panel(module, themes=_ONE_BUNDLED_THEME):
+	"""Build the panel against a fixed set of discovered themes."""
+
+	cls = module.register(themes=_FakeLibrary(themes))
+	panel = cls.__new__(cls)
+	panel.makeSettings(object())
+	return panel
 
 
 # --- pure helpers ---------------------------------------------------------
@@ -200,10 +211,6 @@ def test_build_theme_choices_uses_names_and_ids(addon_gui):
 
 	assert labels == ["Default theme", "Retro"]
 	assert ids == ["default", "retro"]
-
-
-def test_build_theme_choices_falls_back_when_discovery_is_empty(addon_gui):
-	assert addon_gui.build_theme_choices([]) == (["Default"], ["default"])
 
 
 @pytest.mark.parametrize(
@@ -356,12 +363,45 @@ def test_panel_falls_back_to_spec_defaults_without_a_registered_config(addon_gui
 	assert panel.silenceDuringSayAllCheckBox.IsChecked() is False
 
 
-def test_panel_offers_the_bundled_default_when_discovery_is_empty(addon_gui):
-	panel = _make_panel(addon_gui, themes=[])
+def test_the_panel_offers_exactly_what_the_library_discovered(addon_gui):
+	panel = _make_panel(addon_gui, themes=(_theme("default", "Bundled Default"),))
 
-	assert panel.themeChoice.choices == ["Default"]
-	assert panel.themeChoice.selection == 0
-	assert panel._selectedThemeId() == "default"
+	assert panel.themeChoice.choices == ["Bundled Default"]
+	assert panel._themeIds == ["default"]
+
+
+def test_each_registration_gets_its_own_library(addon_gui):
+	first_library = _FakeLibrary((_theme("default", "First"),))
+	second_library = _FakeLibrary(
+		(_theme("default", "Second"), _theme("retro", "Retro"))
+	)
+	first_class = addon_gui.register(themes=first_library)
+	second_class = addon_gui.register(themes=second_library)
+
+	first_panel = first_class.__new__(first_class)
+	first_panel.makeSettings(object())
+	second_panel = second_class.__new__(second_class)
+	second_panel.makeSettings(object())
+
+	assert first_panel.themeChoice.choices == ["First"]
+	assert second_panel.themeChoice.choices == ["Second", "Retro"]
+	assert first_library.discoveries == 1
+	assert second_library.discoveries == 1
+
+
+def test_register_and_unregister_leave_the_category_list_as_they_found_it(addon_gui):
+	categories = addon_gui.gui.settingsDialogs.NVDASettingsDialog.categoryClasses
+	sentinel = object()
+	categories.append(sentinel)
+	original = list(categories)
+
+	panel_class = addon_gui.register(themes=_FakeLibrary(_ONE_BUNDLED_THEME))
+	assert categories == original + [panel_class]
+
+	addon_gui.unregister(panel_class)
+	assert categories == original
+	addon_gui.unregister(panel_class)
+	assert categories == original
 
 
 def test_choosing_a_theme_applies_it_live(addon_gui):

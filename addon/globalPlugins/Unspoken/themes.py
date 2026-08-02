@@ -1,6 +1,6 @@
 """Discover and decode Unspoken sound themes without depending on NVDA.
 
-`load()` returns what crosses the Sound Player seam: `slot -> (frames,
+`SoundThemeLibrary.load()` returns what crosses the Sound Player seam: `slot -> (frames,
 source_rate)`, where **frames are always mono 16-bit little-endian PCM** and
 `source_rate` is whatever the file really was (spec §4.3 -- resampling happens
 below the seam, per source, in OpenAL).
@@ -19,7 +19,6 @@ import configparser
 from dataclasses import dataclass
 import logging
 import math
-import os
 from pathlib import Path
 import struct
 import wave
@@ -43,7 +42,14 @@ _SLOTS = (
     "tab",
     "treeviewitem",
 )
-_REFERENCE_RMS_DBFS = -20.0
+#: The shipped whole-theme normalization level. The loudness rig can choose a
+#: different value through `SoundThemeLibrary` without mutating module state.
+REFERENCE_RMS_DBFS = -20.0
+#: The persisted ID shared with `settings.DEFAULTS["theme"]`. This pure stdlib
+#: module is also loaded standalone by the rigs, so it cannot import settings.
+DEFAULT_THEME_ID = "default"
+#: An untranslated placeholder used only when the bundled default is unreadable.
+_DEFAULT_THEME_NAME = "Default"
 #: The seam's PCM format: mono 16-bit little-endian, whatever the asset was.
 #: The struct code is the single source of truth -- the width and the sample
 #: bounds are derived from it, so the packing and the clamping cannot desync.
@@ -52,8 +58,8 @@ _OUTPUT_SAMPLE_WIDTH = struct.calcsize(f"<{_OUTPUT_FORMAT_CHAR}")
 _OUTPUT_FULL_SCALE = float(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
 _OUTPUT_MINIMUM = -(1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1))
 _OUTPUT_MAXIMUM = (1 << (_OUTPUT_SAMPLE_WIDTH * 8 - 1)) - 1
-_BUNDLED_THEMES_DIR = Path(__file__).resolve().parent / "sound-themes"
-_user_themes_dir: Path | None = None
+#: The sound themes shipped inside the addon.
+BUNDLED_THEMES_DIR = Path(__file__).resolve().parent / "sound-themes"
 
 
 @dataclass
@@ -80,123 +86,170 @@ class _DecodedWav:
     source_rate: int
 
 
-def set_user_themes_dir(path: str | os.PathLike[str] | None) -> None:
-    """Configure the full user ``unspoken-ng/sound-themes`` directory.
+class SoundThemeLibrary:
+    """The sound themes this installation can offer, and their decoded samples.
 
-    This is the module's NVDA-free injection point: the later NVDA wiring can
-    derive the directory from NVDA's user config path and pass it here. Passing
-    ``None`` disables user themes. User themes override bundled themes with the
-    same folder name.
+    Constructed with the two directories it reads -- the bundled one inside the
+    addon and the user's, or None for "no user themes" -- so there is no
+    ordering to get wrong: an instance that exists knows where to look. Every
+    "no usable theme" fallback lives here (#66, ADR 0005); nothing above it
+    has one of its own.
+
+    `reference_rms_dbfs` is the level a whole theme is normalised to. The
+    loudness rig (`tools/audition_loudness.py`) is the only caller that passes
+    anything but the shipped value, and it does so here rather than by reaching
+    into module privates.
     """
 
-    global _user_themes_dir
-    _user_themes_dir = None if path is None else Path(path)
+    def __init__(
+        self,
+        bundled_dir,
+        user_dir,
+        *,
+        reference_rms_dbfs=REFERENCE_RMS_DBFS,
+    ):
+        self._bundled_dir = Path(bundled_dir)
+        self._user_dir = None if user_dir is None else Path(user_dir)
+        self._reference_rms_dbfs = reference_rms_dbfs
 
+    def discover(self) -> list[ThemeInfo]:
+        """Return the usable sound themes by ID; best-effort and never empty.
 
-def get_user_themes_dir() -> Path | None:
-    """Return the currently configured user sound-themes directory."""
+        The user directory is created on first discovery. A usable user folder
+        wins an ID collision; otherwise the bundled folder with that ID does.
+        The bundled default is always in the list even when its folder is
+        missing or unreadable, because an empty combo box is a dead end for a
+        keyboard user and `load` answers for that ID whatever state the folder
+        is in. That is why the settings panel synthesises nothing.
+        """
 
-    return _user_themes_dir
+        try:
+            candidates: dict[str, list[Path]] = {}
+            for path in _theme_directories(self._bundled_dir):
+                candidates[path.name] = [path]
 
-
-def discover() -> list[ThemeInfo]:
-    """Return usable bundled and configured user themes, sorted by ID.
-
-    Discovery is best-effort and never raises. A configured user directory is
-    created on first discovery. When IDs collide, a usable user folder wins;
-    otherwise discovery falls back to the bundled folder with the same ID.
-    """
-
-    try:
-        candidates: dict[str, list[Path]] = {}
-        for path in _theme_directories(_BUNDLED_THEMES_DIR):
-            candidates[path.name] = [path]
-
-        user_dir = _user_themes_dir
-        if user_dir is not None:
-            try:
-                user_dir.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                log.warning(
-                    "Could not create user sound-themes directory %s",
-                    user_dir,
-                    exc_info=True,
-                )
-            else:
-                for path in _theme_directories(user_dir):
-                    candidates.setdefault(path.name, []).insert(0, path)
-
-        discovered = []
-        for theme_id in sorted(candidates):
-            for path in candidates[theme_id]:
+            if self._user_dir is not None:
                 try:
-                    manifest = _read_manifest(path)
-                    if not _theme_has_usable_slot(path):
-                        continue
-                    discovered.append(
-                        ThemeInfo(
-                            id=theme_id,
-                            name=manifest.name,
-                            path=path,
-                            author=manifest.author,
-                            description=manifest.description,
-                        )
-                    )
-                    break
+                    self._user_dir.mkdir(parents=True, exist_ok=True)
                 except Exception:
                     log.warning(
-                        "Skipping malformed sound theme folder %s",
-                        path,
+                        "Could not create user sound-themes directory %s",
+                        self._user_dir,
                         exc_info=True,
                     )
-        return discovered
-    except Exception:
-        log.warning("Sound theme discovery failed", exc_info=True)
-        return []
+                else:
+                    for path in _theme_directories(self._user_dir):
+                        candidates.setdefault(path.name, []).insert(0, path)
 
+            discovered = []
+            for theme_id in sorted(candidates):
+                for path in candidates[theme_id]:
+                    try:
+                        manifest = _read_manifest(path)
+                        if not _theme_has_usable_slot(path):
+                            continue
+                        discovered.append(
+                            ThemeInfo(
+                                id=theme_id,
+                                name=manifest.name,
+                                path=path,
+                                author=manifest.author,
+                                description=manifest.description,
+                            )
+                        )
+                        break
+                    except Exception:
+                        log.warning(
+                            "Skipping malformed sound theme folder %s",
+                            path,
+                            exc_info=True,
+                        )
+            if not any(info.id == DEFAULT_THEME_ID for info in discovered):
+                discovered.append(self._default_entry())
+            return sorted(discovered, key=lambda info: info.id)
+        except Exception:
+            log.warning("Sound theme discovery failed", exc_info=True)
+            return [self._default_entry()]
 
-def load(theme_id: str) -> dict[str, tuple[bytes, int]]:
-    """Load a sound theme, filling sparse slots from the bundled default.
+    def _default_entry(self) -> ThemeInfo:
+        path = self._bundled_dir / DEFAULT_THEME_ID
+        name = _read_manifest(path).name
+        return ThemeInfo(
+            id=DEFAULT_THEME_ID,
+            name=_DEFAULT_THEME_NAME if name == DEFAULT_THEME_ID else name,
+            path=path,
+        )
 
-    Returns `slot -> (mono 16-bit little-endian PCM frames, source_rate)` --
-    the seam's format for every slot, whatever width the asset was authored at.
-    """
+    def load(self, theme_id: str) -> dict[str, tuple[bytes, int]]:
+        """Load a theme, structurally filling its missing slots from the default.
 
-    try:
-        requested_path = _find_requested_theme(theme_id)
-        default_path = _find_theme(_BUNDLED_THEMES_DIR, "default")
+        The merge is not a recovery path that can be skipped: a theme that
+        decodes to nothing gets every slot from the default. This returns `{}`
+        only when the bundled default itself is unusable. That emptiness is
+        load-bearing: `GlobalPlugin` counts the slots and
+        `playback.can_produce_role_sound` turns zero into degraded mode, so it
+        is deliberately not papered over here.
 
-        if requested_path is None:
-            log.warning(
-                "Sound theme %r was not found; using the bundled default",
+        The samples are mono 16-bit little-endian PCM frames paired with their
+        true source rate, whatever width the asset was authored at.
+        """
+
+        try:
+            requested_path = self._find_requested(theme_id)
+            if requested_path is None:
+                log.warning(
+                    "Sound theme %r was not found; using the bundled default",
+                    theme_id,
+                )
+                return self._load_default()
+            # Equal paths stop the bundled default being decoded twice on startup.
+            if requested_path == _find_theme(self._bundled_dir, DEFAULT_THEME_ID):
+                return _load_processed_theme(
+                    requested_path,
+                    self._reference_rms_dbfs,
+                )
+            return _merge_over_default(
+                _load_processed_theme(requested_path, self._reference_rms_dbfs),
+                self._load_default(),
                 theme_id,
             )
-            return _load_default(default_path)
-
-        requested = _load_processed_theme(requested_path)
-        if requested_path == default_path:
-            return requested
-
-        default = _load_default(default_path)
-        merged = dict(requested)
-        for slot in _SLOTS:
-            if slot in requested:
-                continue
-            if slot in default:
-                log.info(
-                    "Sound theme %r has no usable %s slot; falling back to default",
-                    theme_id,
-                    slot,
-                )
-                merged[slot] = default[slot]
-        return merged
-    except Exception:
-        log.warning("Could not load sound theme %r", theme_id, exc_info=True)
-        try:
-            return _load_default(_find_theme(_BUNDLED_THEMES_DIR, "default"))
         except Exception:
-            log.warning("Could not recover with the bundled default", exc_info=True)
+            log.warning("Could not load sound theme %r", theme_id, exc_info=True)
             return {}
+
+    def _load_default(self) -> dict[str, tuple[bytes, int]]:
+        path = _find_theme(self._bundled_dir, DEFAULT_THEME_ID)
+        if path is None:
+            log.warning("The bundled default sound theme is unavailable")
+            return {}
+        return _load_processed_theme(path, self._reference_rms_dbfs)
+
+    def _find_requested(self, theme_id: str) -> Path | None:
+        user_theme = _find_theme(self._user_dir, theme_id)
+        if user_theme is not None:
+            return user_theme
+        return _find_theme(self._bundled_dir, theme_id)
+
+
+def _merge_over_default(
+    requested: dict[str, tuple[bytes, int]],
+    default: dict[str, tuple[bytes, int]],
+    theme_id: str,
+) -> dict[str, tuple[bytes, int]]:
+    """Fill the slots `requested` has no usable sample for; one log line per filled slot."""
+
+    merged = dict(requested)
+    for slot in _SLOTS:
+        if slot in requested:
+            continue
+        if slot in default:
+            log.info(
+                "Sound theme %r has no usable %s slot; falling back to default",
+                theme_id,
+                slot,
+            )
+            merged[slot] = default[slot]
+    return merged
 
 
 def _theme_directories(root: Path) -> list[Path]:
@@ -225,13 +278,6 @@ def _find_theme(root: Path | None, theme_id: str) -> Path | None:
         if path.name == theme_id:
             return path
     return None
-
-
-def _find_requested_theme(theme_id: str) -> Path | None:
-    user_theme = _find_theme(_user_themes_dir, theme_id)
-    if user_theme is not None:
-        return user_theme
-    return _find_theme(_BUNDLED_THEMES_DIR, theme_id)
 
 
 def _read_manifest(theme_path: Path) -> _Manifest:
@@ -397,11 +443,19 @@ def _average_samples(left: int, right: int) -> int:
     return round((left + right) / 2)
 
 
-def _load_processed_theme(theme_path: Path) -> dict[str, tuple[bytes, int]]:
+def _load_processed_theme(
+    theme_path: Path,
+    reference_rms_dbfs: float,
+) -> dict[str, tuple[bytes, int]]:
     try:
         manifest = _read_manifest(theme_path)
         decoded = _read_theme_wavs(theme_path)
-        return _process_theme(decoded, manifest.gain_db, theme_path.name)
+        return _process_theme(
+            decoded,
+            manifest.gain_db,
+            theme_path.name,
+            reference_rms_dbfs,
+        )
     except Exception:
         log.warning("Could not process sound theme %s", theme_path, exc_info=True)
         return {}
@@ -411,6 +465,7 @@ def _process_theme(
     decoded: dict[str, _DecodedWav],
     manifest_gain_db: float,
     theme_id: str,
+    reference_rms_dbfs: float = REFERENCE_RMS_DBFS,
 ) -> dict[str, tuple[bytes, int]]:
     if not decoded:
         return {}
@@ -426,7 +481,7 @@ def _process_theme(
 
     rms = math.sqrt(square_sum / sample_count) if sample_count else 0.0
     if rms:
-        reference_rms = 10.0 ** (_REFERENCE_RMS_DBFS / 20.0)
+        reference_rms = 10.0 ** (reference_rms_dbfs / 20.0)
         normalization_factor = reference_rms / rms
         clamped_gain_db = max(-12.0, min(12.0, manifest_gain_db))
         if clamped_gain_db != manifest_gain_db:
@@ -528,10 +583,3 @@ def _encode_samples(samples: list[int]) -> bytes:
     """Pack into the seam's one format: mono 16-bit little-endian PCM."""
 
     return struct.pack(f"<{len(samples)}{_OUTPUT_FORMAT_CHAR}", *samples)
-
-
-def _load_default(default_path: Path | None) -> dict[str, tuple[bytes, int]]:
-    if default_path is None:
-        log.warning("The bundled default sound theme is unavailable")
-        return {}
-    return _load_processed_theme(default_path)
