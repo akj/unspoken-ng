@@ -1,7 +1,5 @@
 """The Unspoken-ng settings panel: four controls, sound theme first (spec §8)."""
 
-from typing import Callable
-
 import addonHandler
 import config
 import gui
@@ -11,28 +9,6 @@ from . import settings
 
 
 addonHandler.initTranslation()
-
-
-def _apply_theme_noop(theme_id):
-	pass
-
-
-def _apply_reverb_noop(preset):
-	pass
-
-
-# The live-preview seam. GlobalPlugin replaces both hooks in issue #38 so that
-# choosing a sound theme or a reverb preset is heard while the panel is open;
-# until then they are no-ops, which keeps this module importable and testable
-# off NVDA.
-#
-# Contract, honoured by #38: both hooks are called on NVDA's main thread, once
-# per selection change — that is, once per arrow keypress while the user moves
-# through a combo box. Neither may block: decoding a sound theme belongs on the
-# Sound Player's worker, not here. GlobalPlugin debounces the theme hook for
-# exactly that reason.
-apply_theme: Callable[[str], None] = _apply_theme_noop
-apply_reverb: Callable[[str], None] = _apply_reverb_noop
 
 
 def _labelled(values, labels):
@@ -137,6 +113,9 @@ def reverb_value_for_index(index):
 class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 	#: Bound by `register` onto the class NVDA constructs; see its docstring.
 	_themes = None
+	#: Bound by `register` alongside `_themes`; the panel's one voice to the
+	#: running addon while it is open.
+	_preview = None
 
 	# Translators: The title of this add-on's category in NVDA's settings dialog.
 	title = _("Unspoken-ng")
@@ -200,10 +179,10 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 		self._priorReverbPreset = self._selectedReverbPreset()
 
 	def onThemeChanged(self, event):
-		apply_theme(self._selectedThemeId())
+		self._preview.preview_theme(self._selectedThemeId())
 
 	def onReverbChanged(self, event):
-		apply_reverb(self._selectedReverbPreset())
+		self._preview.preview_reverb(self._selectedReverbPreset())
 
 	def onSave(self):
 		section = config.conf["unspoken"]
@@ -232,13 +211,10 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 		for key, value in self._priorSettings.items():
 			section[key] = value
 
-		# Revert the live preview, but only where it actually moved: reloading a
-		# sound theme is expensive, and every Cancel of NVDA's settings dialog
-		# reaches this panel once it has been visited.
-		if self._selectedThemeId() != self._priorThemeId:
-			apply_theme(self._priorThemeId)
-		if self._selectedReverbPreset() != self._priorReverbPreset:
-			apply_reverb(self._priorReverbPreset)
+		# What the panel opened, or last saved, showing — which is what the user
+		# was hearing. Unconditional: whether putting it back costs anything is
+		# the preview adapter's knowledge, not ours.
+		self._preview.revert(self._priorThemeId, self._priorReverbPreset)
 
 	def _readSettings(self):
 		"""Snapshot the four settings, tolerating a config spec not yet registered.
@@ -267,7 +243,7 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 		return reverb_value_for_index(self.reverbChoice.GetSelection())
 
 
-def register(*, themes):
+def register(*, themes, preview):
 	"""Give NVDA a settings panel bound to the collaborators it needs.
 
 	NVDA constructs the panel itself, from a class it holds in
@@ -281,6 +257,10 @@ def register(*, themes):
 	`themes` is a `themes.SoundThemeLibrary`; the panel asks it for `discover()`
 	and nothing else, and takes its answer as final.
 
+	`preview` satisfies `preview.Preview` — preview a sound theme, preview a
+	reverb preset, revert — and everything about debouncing or the cost of
+	reapplying lives behind it, not in the panel.
+
 	Returns the class to hand back to `unregister`.
 	"""
 
@@ -288,6 +268,7 @@ def register(*, themes):
 		pass
 
 	UnspokenSettingsPanel._themes = themes
+	UnspokenSettingsPanel._preview = preview
 	gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(UnspokenSettingsPanel)
 	return UnspokenSettingsPanel
 

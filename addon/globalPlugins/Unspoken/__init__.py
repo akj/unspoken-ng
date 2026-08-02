@@ -8,8 +8,8 @@ things and nothing else:
 
 - **Wiring.** The config spec and its one-shot migration, the sound theme library
   and the two directories it reads, the settings provider, the Sound Player,
-  and -- because it is the thing that attempted the player and caught the
-  failure -- degraded mode.
+  the settings panel's live-preview adapter, and -- because it is the thing
+  that attempted the player and caught the failure -- degraded mode.
 - **Entry points.** Three object events, one speech-pipeline hook that places
   sounds into the speech stream, and one that only suppresses.
 - **The main-thread property reads.** `obj.role` and `obj.location`, once each,
@@ -62,7 +62,7 @@ import wx
 from logHandler import log
 from speech.commands import CallbackCommand
 
-from . import debounce, migration, playback, roles, settings, spatial, themes, volume
+from . import migration, playback, roles, settings, spatial, themes, volume
 from .player import NoAudioEndpointError, OpenALSoundPlayer, SilentSoundPlayer
 
 
@@ -75,19 +75,10 @@ addonHandler.initTranslation()
 USER_DATA_DIR_NAME = "unspoken-ng"
 SOUND_THEMES_DIR_NAME = "sound-themes"
 
-#: How long a burst of live-preview keypresses is collapsed over before the
-#: sound theme is decoded. Long enough that holding an arrow key through a
-#: ten-theme list decodes once, short enough to still feel like a preview.
-THEME_PREVIEW_DEBOUNCE_MS = 300
-
 #: Spec section 9.4's one message, deferred past NVDA's own startup speech.
 #: Nothing is raised from `__init__` and nothing is spoken from it either: at
 #: plugin-construction time NVDA is not yet ready to speak.
 DEGRADED_MESSAGE_DELAY_MS = 4000
-
-
-def _noop(*args, **kwargs):
-    """What `addonGui`'s live-preview hooks are restored to on terminate."""
 
 
 def _conf(key):
@@ -432,7 +423,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._properties_speech_hook = None
         self._control_field_hook = None
         self._degraded_message_timer = None
-        self._apply_theme = None
+        self._preview = None
         self._settings_panel = None
 
         # 1. Config. The spec is registered here -- `GlobalPlugin` is its
@@ -493,15 +484,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             self._player.set_theme(sounds)
             self._player.set_reverb(_conf("reverb"))
 
-        # 5. The settings panel, and the live-preview hooks it calls.
-        from . import addonGui
+        # 5. The settings panel and the live preview it drives. The panel is a
+        #    class NVDA constructs, so its collaborators are bound to the class
+        #    `register` returns; giving them back is `unregister`, with nothing
+        #    to restore and no pointer to compare.
+        from . import addonGui, preview
 
-        self._settings_panel = addonGui.register(themes=self._themes)
-        self._apply_theme = debounce.Debounce(
-            THEME_PREVIEW_DEBOUNCE_MS, self._load_theme, wx.CallLater
+        self._preview = preview.LivePreview(
+            self._player,
+            self._themes,
+            wx.CallLater,
+            theme_id=_conf("theme"),
+            reverb_preset=_conf("reverb"),
         )
-        addonGui.apply_theme = self._apply_theme
-        addonGui.apply_reverb = self._apply_reverb
+        self._settings_panel = addonGui.register(themes=self._themes, preview=self._preview)
 
         # 6. The two entry points that are patches rather than events.
         #    Both originals are resolved, and both hooks built, before either
@@ -754,22 +750,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         return getPropertiesSpeech
 
-    # ------------------------------------------------------- settings panel
-
-    def _load_theme(self, theme_id):
-        """Decode and upload a sound theme. Debounced -- see `debounce.Debounce`."""
-        try:
-            self._player.set_theme(self._themes.load(theme_id))
-        except Exception:
-            log.error(f"Unspoken: could not apply sound theme {theme_id!r}", exc_info=True)
-
-    def _apply_reverb(self, preset):
-        """The panel's other live-preview hook. A handful of EFX writes; no debounce."""
-        try:
-            self._player.set_reverb(preset)
-        except Exception:
-            log.error(f"Unspoken: could not apply reverb preset {preset!r}", exc_info=True)
-
     # ------------------------------------------------------------- lifetime
 
     def _announce_degraded(self):
@@ -801,23 +781,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             pass
         self._degraded_message_timer = None
 
-        if self._apply_theme is not None:
+        if self._preview is not None:
             try:
-                self._apply_theme.cancel()
+                self._preview.close()
             except Exception:
                 pass
-
-        # Unpatch only what is still ours. Another addon may have patched over
-        # us since; restoring then would delete its hook, not ours.
-        try:
-            from . import addonGui
-
-            if addonGui.apply_theme is self._apply_theme:
-                addonGui.apply_theme = _noop
-            if addonGui.apply_reverb == self._apply_reverb:
-                addonGui.apply_reverb = _noop
-        except Exception:
-            log.debugWarning("Unspoken: could not release the panel hooks", exc_info=True)
 
         # Neither hook's saved original is cleared here, and neither hook is
         # dropped. When we decline to restore because someone patched over us,

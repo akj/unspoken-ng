@@ -36,6 +36,10 @@ _Avoid_: sound pack, sound scheme, sound set
 The object that knows where sound themes live and what they decode to (`themes.SoundThemeLibrary`), constructed with its two directories — the bundled one inside the addon and the user's, or none. It owns every "no usable theme" fallback: discovery always offers the bundled default, and loading fills a theme's missing slots from it. Loading returns nothing only when the bundled default is itself unusable, which is what degrades the session. Pure stdlib, above the Sound Player seam (ADR 0003, ADR 0005).
 _Avoid_: theme manager, theme registry, theme loader, the themes module
 
+**Live preview**:
+Hearing a settings change while the panel is still open — the sound theme and the reverb preset, the two settings that are audible. The panel asks for it through one declared interface (`preview.Preview`: preview a theme, preview a reverb preset, revert), handed to it when the panel is registered; the plugin-side adapter owns the debounce that collapses a burst of arrow keypresses into one theme decode, and knows what is already playing. Cancel reverts to what the panel opened, or last saved, showing (ADR 0006).
+_Avoid_: apply hooks, live apply, preview callbacks, the apply_theme hook
+
 **Slot**:
 A canonical sound identity (button, link, checkbox, …) that a sound theme provides a file for. The addon maps the ~40 NVDA control roles onto the ~15 slots.
 _Avoid_: sound name, sound key

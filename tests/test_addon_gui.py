@@ -17,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import preview
 import settings as addon_settings
 
 
@@ -52,6 +53,22 @@ class _FakeLibrary:
 	def discover(self):
 		self.discoveries += 1
 		return list(self.themes)
+
+
+class _RecordingPreview:
+	"""The second adapter: what the panel asked for, in order."""
+
+	def __init__(self):
+		self.calls = []
+
+	def preview_theme(self, theme_id):
+		self.calls.append(("theme", theme_id))
+
+	def preview_reverb(self, preset):
+		self.calls.append(("reverb", preset))
+
+	def revert(self, theme_id, preset):
+		self.calls.append(("revert", theme_id, preset))
 
 
 class _FakeChoice:
@@ -192,10 +209,11 @@ def _theme(theme_id, name):
 _ONE_BUNDLED_THEME = (_theme("default", "Default"),)
 
 
-def _make_panel(module, themes=_ONE_BUNDLED_THEME):
+def _make_panel(module, themes=_ONE_BUNDLED_THEME, preview=None):
 	"""Build the panel against a fixed set of discovered themes."""
 
-	cls = module.register(themes=_FakeLibrary(themes))
+	preview = preview or _RecordingPreview()
+	cls = module.register(themes=_FakeLibrary(themes), preview=preview)
 	panel = cls.__new__(cls)
 	panel.makeSettings(object())
 	return panel
@@ -375,8 +393,12 @@ def test_each_registration_gets_its_own_library(addon_gui):
 	second_library = _FakeLibrary(
 		(_theme("default", "Second"), _theme("retro", "Retro"))
 	)
-	first_class = addon_gui.register(themes=first_library)
-	second_class = addon_gui.register(themes=second_library)
+	first_class = addon_gui.register(
+		themes=first_library, preview=_RecordingPreview()
+	)
+	second_class = addon_gui.register(
+		themes=second_library, preview=_RecordingPreview()
+	)
 
 	first_panel = first_class.__new__(first_class)
 	first_panel.makeSettings(object())
@@ -395,7 +417,9 @@ def test_register_and_unregister_leave_the_category_list_as_they_found_it(addon_
 	categories.append(sentinel)
 	original = list(categories)
 
-	panel_class = addon_gui.register(themes=_FakeLibrary(_ONE_BUNDLED_THEME))
+	panel_class = addon_gui.register(
+		themes=_FakeLibrary(_ONE_BUNDLED_THEME), preview=_RecordingPreview()
+	)
 	assert categories == original + [panel_class]
 
 	addon_gui.unregister(panel_class)
@@ -405,25 +429,25 @@ def test_register_and_unregister_leave_the_category_list_as_they_found_it(addon_
 
 
 def test_choosing_a_theme_applies_it_live(addon_gui):
-	applied = []
-	addon_gui.apply_theme = applied.append
+	preview_recorder = _RecordingPreview()
 	panel = _make_panel(
-		addon_gui, themes=[_theme("default", "Default"), _theme("retro", "Retro")]
+		addon_gui,
+		themes=[_theme("default", "Default"), _theme("retro", "Retro")],
+		preview=preview_recorder,
 	)
 
 	panel.themeChoice.choose(1, addon_gui._test_wx.EVT_CHOICE)
 
-	assert applied == ["retro"]
+	assert preview_recorder.calls == [("theme", "retro")]
 
 
 def test_choosing_a_reverb_preset_applies_it_live(addon_gui):
-	applied = []
-	addon_gui.apply_reverb = applied.append
-	panel = _make_panel(addon_gui)
+	preview_recorder = _RecordingPreview()
+	panel = _make_panel(addon_gui, preview=preview_recorder)
 
 	panel.reverbChoice.choose(3, addon_gui._test_wx.EVT_CHOICE)
 
-	assert applied == ["hall"]
+	assert preview_recorder.calls == [("reverb", "hall")]
 
 
 def test_role_announcement_is_not_applied_live(addon_gui):
@@ -433,18 +457,18 @@ def test_role_announcement_is_not_applied_live(addon_gui):
 
 
 def test_save_persists_all_four_settings_without_reapplying(addon_gui):
-	themes_applied = []
-	reverbs_applied = []
-	addon_gui.apply_theme = themes_applied.append
-	addon_gui.apply_reverb = reverbs_applied.append
+	preview_recorder = _RecordingPreview()
 	panel = _make_panel(
-		addon_gui, themes=[_theme("default", "Default"), _theme("retro", "Retro")]
+		addon_gui,
+		themes=[_theme("default", "Default"), _theme("retro", "Retro")],
+		preview=preview_recorder,
 	)
 
 	panel.themeChoice.choose(1, addon_gui._test_wx.EVT_CHOICE)
 	panel.roleAnnouncementChoice.SetSelection(1)
 	panel.reverbChoice.choose(2, addon_gui._test_wx.EVT_CHOICE)
 	panel.silenceDuringSayAllCheckBox.SetValue(True)
+	calls_before_save = list(preview_recorder.calls)
 	panel.onSave()
 
 	assert addon_gui._test_conf["unspoken"] == {
@@ -453,16 +477,14 @@ def test_save_persists_all_four_settings_without_reapplying(addon_gui):
 		"reverb": "mediumRoom",
 		"silenceDuringSayAll": True,
 	}
-	# Each live setting was applied exactly once, by its own selection change.
-	assert themes_applied == ["retro"]
-	assert reverbs_applied == ["mediumRoom"]
+	assert preview_recorder.calls == calls_before_save == [
+		("theme", "retro"),
+		("reverb", "mediumRoom"),
+	]
 
 
 def test_cancel_reverts_to_the_state_the_panel_opened_with(addon_gui):
-	themes_applied = []
-	reverbs_applied = []
-	addon_gui.apply_theme = themes_applied.append
-	addon_gui.apply_reverb = reverbs_applied.append
+	preview_recorder = _RecordingPreview()
 	addon_gui._test_conf["unspoken"] = {
 		"theme": "default",
 		"roleAnnouncement": "sounds",
@@ -476,6 +498,7 @@ def test_cancel_reverts_to_the_state_the_panel_opened_with(addon_gui):
 			_theme("retro", "Retro"),
 			_theme("marimba", "Marimba"),
 		],
+		preview=preview_recorder,
 	)
 
 	panel.themeChoice.choose(1, addon_gui._test_wx.EVT_CHOICE)
@@ -485,8 +508,11 @@ def test_cancel_reverts_to_the_state_the_panel_opened_with(addon_gui):
 	panel.onDiscard()
 
 	# Not the previous selection: the one the panel opened with.
-	assert themes_applied[-1] == "default"
-	assert reverbs_applied[-1] == "smallRoom"
+	assert preview_recorder.calls[-1] == (
+		"revert",
+		"default",
+		"smallRoom",
+	)
 	assert addon_gui._test_conf["unspoken"] == {
 		"theme": "default",
 		"roleAnnouncement": "sounds",
@@ -496,8 +522,7 @@ def test_cancel_reverts_to_the_state_the_panel_opened_with(addon_gui):
 
 
 def test_cancel_after_apply_reverts_to_the_applied_state(addon_gui):
-	themes_applied = []
-	addon_gui.apply_theme = themes_applied.append
+	preview_recorder = _RecordingPreview()
 	panel = _make_panel(
 		addon_gui,
 		themes=[
@@ -505,28 +530,28 @@ def test_cancel_after_apply_reverts_to_the_applied_state(addon_gui):
 			_theme("retro", "Retro"),
 			_theme("marimba", "Marimba"),
 		],
+		preview=preview_recorder,
 	)
 
 	panel.themeChoice.choose(1, addon_gui._test_wx.EVT_CHOICE)
+	panel.reverbChoice.choose(3, addon_gui._test_wx.EVT_CHOICE)
 	panel.onSave()  # what the Apply button does; the dialog stays open
 	panel.themeChoice.choose(2, addon_gui._test_wx.EVT_CHOICE)
+	panel.reverbChoice.choose(0, addon_gui._test_wx.EVT_CHOICE)
 	panel.onDiscard()
 
-	assert themes_applied[-1] == "retro"
+	assert preview_recorder.calls[-1] == ("revert", "retro", "hall")
 	assert addon_gui._test_conf["unspoken"]["theme"] == "retro"
+	assert addon_gui._test_conf["unspoken"]["reverb"] == "hall"
 
 
-def test_cancel_without_changes_leaves_the_live_state_alone(addon_gui):
-	themes_applied = []
-	reverbs_applied = []
-	addon_gui.apply_theme = themes_applied.append
-	addon_gui.apply_reverb = reverbs_applied.append
-	panel = _make_panel(addon_gui)
+def test_cancel_without_changes_asks_for_the_state_it_opened_with(addon_gui):
+	preview_recorder = _RecordingPreview()
+	panel = _make_panel(addon_gui, preview=preview_recorder)
 
 	panel.onDiscard()
 
-	assert themes_applied == []
-	assert reverbs_applied == []
+	assert preview_recorder.calls == [("revert", "default", "smallRoom")]
 
 
 def test_cancel_stops_a_late_selection_event_from_reapplying(addon_gui):
@@ -537,3 +562,7 @@ def test_cancel_stops_a_late_selection_event_from_reapplying(addon_gui):
 	evt_choice = addon_gui._test_wx.EVT_CHOICE
 	assert evt_choice not in panel.themeChoice.handlers
 	assert evt_choice not in panel.reverbChoice.handlers
+
+
+def test_the_recording_adapter_is_the_declared_interface():
+	assert isinstance(_RecordingPreview(), preview.Preview)
