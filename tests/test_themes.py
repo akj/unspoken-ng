@@ -60,25 +60,21 @@ def _rms_dbfs(samples, sample_width):
     return 20 * math.log10(rms)
 
 
-@pytest.fixture(autouse=True)
-def reset_user_themes_dir():
-    themes.set_user_themes_dir(None)
-    yield
-    themes.set_user_themes_dir(None)
-
-
 @pytest.fixture
-def theme_roots(tmp_path, monkeypatch):
+def theme_roots(tmp_path):
     bundled = tmp_path / "bundled" / "sound-themes"
     user = tmp_path / "user" / "unspoken-ng" / "sound-themes"
     bundled.mkdir(parents=True)
-    monkeypatch.setattr(themes, "_BUNDLED_THEMES_DIR", bundled)
-    themes.set_user_themes_dir(user)
-    yield bundled, user
-    themes.set_user_themes_dir(None)
+    return bundled, user
 
 
-def test_sparse_theme_merges_over_bundled_default(theme_roots):
+@pytest.fixture
+def library(theme_roots):
+    bundled, user = theme_roots
+    return themes.SoundThemeLibrary(bundled, user)
+
+
+def test_sparse_theme_merges_over_bundled_default(theme_roots, library):
     bundled, user = theme_roots
     default = bundled / "default"
     sparse = user / "sparse"
@@ -86,15 +82,15 @@ def test_sparse_theme_merges_over_bundled_default(theme_roots):
     _write_wav(default / "link.wav", [-2000, 2000])
     _write_wav(sparse / "button.wav", [-3000, 3000])
 
-    default_result = themes.load("default")
-    sparse_result = themes.load("sparse")
+    default_result = library.load("default")
+    sparse_result = library.load("sparse")
 
     assert set(sparse_result) == {"button", "link"}
     assert sparse_result["link"] == default_result["link"]
     assert sparse_result["button"] != default_result["button"]
 
 
-def test_stereo_is_downmixed_to_mono_before_normalization(theme_roots):
+def test_stereo_is_downmixed_to_mono_before_normalization(theme_roots, library):
     _, user = theme_roots
     # Interleaved frames average to [2000, 0, -2000].
     _write_wav(
@@ -104,7 +100,7 @@ def test_stereo_is_downmixed_to_mono_before_normalization(theme_roots):
         rate=44100,
     )
 
-    frames, source_rate = themes.load("stereo")["button"]
+    frames, source_rate = library.load("stereo")["button"]
     samples = _decode_pcm(frames, 2)
 
     assert source_rate == 44100
@@ -124,6 +120,7 @@ def test_stereo_is_downmixed_to_mono_before_normalization(theme_roots):
 )
 def test_rms_normalization_and_manifest_gain_clamp(
     theme_roots,
+    library,
     manifest_gain,
     effective_gain,
 ):
@@ -135,7 +132,7 @@ def test_rms_normalization_and_manifest_gain_clamp(
         encoding="utf-8",
     )
 
-    frames, _ = themes.load(theme.name)["button"]
+    frames, _ = library.load(theme.name)["button"]
     samples = _decode_pcm(frames, 2)
 
     assert _rms_dbfs(samples, 2) == pytest.approx(
@@ -144,7 +141,7 @@ def test_rms_normalization_and_manifest_gain_clamp(
     )
 
 
-def test_manifest_gain_allows_trailing_inline_comment(theme_roots):
+def test_manifest_gain_allows_trailing_inline_comment(theme_roots, library):
     _, user = theme_roots
     theme = user / "inline-comment"
     _write_wav(theme / "button.wav", [-1000, 1000] * 8)
@@ -157,12 +154,12 @@ def test_manifest_gain_allows_trailing_inline_comment(theme_roots):
 
     assert themes._read_manifest(theme).gain_db == -2.5
 
-    frames, _ = themes.load(theme.name)["button"]
+    frames, _ = library.load(theme.name)["button"]
     samples = _decode_pcm(frames, 2)
     assert _rms_dbfs(samples, 2) == pytest.approx(-22.5, abs=0.01)
 
 
-def test_malformed_wavs_are_rejected_and_fall_back(theme_roots):
+def test_malformed_wavs_are_rejected_and_fall_back(theme_roots, library):
     bundled, user = theme_roots
     default = bundled / "default"
     broken = user / "broken"
@@ -172,17 +169,17 @@ def test_malformed_wavs_are_rejected_and_fall_back(theme_roots):
     _write_wav(broken / "button.wav", [128, 128], sample_width=1)
     (broken / "link.wav").write_bytes(b"not a wav")
 
-    default_result = themes.load("default")
-    broken_result = themes.load("broken")
+    default_result = library.load("default")
+    broken_result = library.load("broken")
 
     assert broken_result["button"] == default_result["button"]
     assert broken_result["link"] == default_result["link"]
     assert "icon" in broken_result
-    assert "broken" in {info.id for info in themes.discover()}
+    assert "broken" in {info.id for info in library.discover()}
 
 
 @pytest.mark.parametrize("bad_gain", ["loud", "nan"])
-def test_bad_manifest_gain_preserves_valid_metadata(theme_roots, bad_gain):
+def test_bad_manifest_gain_preserves_valid_metadata(theme_roots, library, bad_gain):
     _, user = theme_roots
     theme = user / f"bad-manifest-{bad_gain}"
     _write_wav(theme / "button.wav", [-1000, 1000])
@@ -195,8 +192,8 @@ def test_bad_manifest_gain_preserves_valid_metadata(theme_roots, bad_gain):
         encoding="utf-8",
     )
 
-    info = next(info for info in themes.discover() if info.id == theme.name)
-    result = themes.load(theme.name)
+    info = next(info for info in library.discover() if info.id == theme.name)
+    result = library.load(theme.name)
 
     assert info.name == "Preserved Name"
     assert info.author == "Somebody"
@@ -206,7 +203,7 @@ def test_bad_manifest_gain_preserves_valid_metadata(theme_roots, bad_gain):
     assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
 
 
-def test_structurally_bad_manifest_falls_back_to_folder_metadata(theme_roots):
+def test_structurally_bad_manifest_falls_back_to_folder_metadata(theme_roots, library):
     _, user = theme_roots
     theme = user / "broken-ini"
     _write_wav(theme / "button.wav", [-1000, 1000])
@@ -215,20 +212,20 @@ def test_structurally_bad_manifest_falls_back_to_folder_metadata(theme_roots):
         encoding="utf-8",
     )
 
-    info = next(info for info in themes.discover() if info.id == theme.name)
+    info = next(info for info in library.discover() if info.id == theme.name)
 
     assert info.name == theme.name
     assert info.author is None
     assert info.description is None
 
 
-def test_discover_creates_user_dir_drops_empty_and_prefers_user(theme_roots):
+def test_discover_creates_user_dir_drops_empty_and_prefers_user(theme_roots, library):
     bundled, user = theme_roots
     _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
     _write_wav(bundled / "shared" / "button.wav", [-1000, 1000])
 
     assert not user.exists()
-    first_result = themes.discover()
+    first_result = library.discover()
     assert user.is_dir()
     assert {info.id for info in first_result} == {"default", "shared"}
 
@@ -244,27 +241,59 @@ def test_discover_creates_user_dir_drops_empty_and_prefers_user(theme_roots):
         encoding="utf-8",
     )
 
-    result = {info.id: info for info in themes.discover()}
+    result = {info.id: info for info in library.discover()}
 
     assert set(result) == {"default", "normal", "shared"}
     assert result["shared"].name == "User Shared"
     assert result["shared"].path == user / "shared"
 
 
-def test_discover_uses_bundled_collision_when_user_theme_is_unusable(theme_roots):
+def test_discovery_always_offers_the_bundled_default(theme_roots, library):
+    discovered = library.discover()
+
+    assert [info.id for info in discovered] == ["default"]
+    assert discovered[0].name == "Default"
+
+
+def test_a_broken_default_still_appears_beside_the_user_themes(
+    theme_roots,
+    library,
+):
+    _, user = theme_roots
+    _write_wav(user / "retro" / "button.wav", [-1000, 1000])
+
+    assert [info.id for info in library.discover()] == ["default", "retro"]
+
+
+def test_a_broken_default_loads_to_nothing_so_the_session_degrades(library):
+    assert library.load("default") == {}
+    assert library.load("anything") == {}
+
+    import playback
+
+    assert not playback.can_produce_role_sound(
+        {"engine_ready": True, "device_open": True, "slots_loaded": 0}
+    )
+
+
+def test_discover_uses_bundled_collision_when_user_theme_is_unusable(
+    theme_roots,
+    library,
+):
     bundled, user = theme_roots
     bundled_default = bundled / "default"
     _write_wav(bundled_default / "button.wav", [-1000, 1000])
     (user / "default").mkdir(parents=True)
 
-    result = {info.id: info for info in themes.discover()}
+    result = {info.id: info for info in library.discover()}
 
     assert result["default"].path == bundled_default
-    assert "button" in themes.load("default")
+    assert "button" in library.load("default")
 
 
 def test_discover_checks_wav_headers_without_reading_frames(
     theme_roots,
+    library,
     monkeypatch,
 ):
     bundled, _ = theme_roots
@@ -275,10 +304,10 @@ def test_discover_checks_wav_headers_without_reading_frames(
 
     monkeypatch.setattr(wave.Wave_read, "readframes", fail_if_called)
 
-    assert [info.id for info in themes.discover()] == ["default"]
+    assert [info.id for info in library.discover()] == ["default"]
 
 
-def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
+def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots, library):
     """A 24-bit asset must cross the seam as 16-bit, scaled, not reinterpreted.
 
     Core OpenAL has no 24-bit format: 3-byte frames handed to the Sound Player
@@ -294,7 +323,7 @@ def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
         rate=48000,
     )
 
-    frames, source_rate = themes.load("twenty-four-bit")["button"]
+    frames, source_rate = library.load("twenty-four-bit")["button"]
     samples = _decode_pcm(frames, 2)
 
     assert source_rate == 48000, "the true rate still crosses the seam"
@@ -310,7 +339,7 @@ def test_24_bit_pcm_is_converted_to_the_seam_width(theme_roots):
     assert abs(samples[0]) == pytest.approx(2 * abs(samples[1]), rel=1e-3)
 
 
-def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
+def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots, library):
     """The seam has one width, whatever mixture of assets a theme is made of.
 
     Byte counts are the assertion, because they are what a width change moves:
@@ -336,7 +365,7 @@ def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
         rate=22050,
     )
 
-    loaded = themes.load("mixed-widths")
+    loaded = library.load("mixed-widths")
 
     assert {"button", "link", "tab"} <= set(loaded)
     assert {slot: len(loaded[slot][0]) for slot in ("button", "link", "tab")} == {
@@ -351,7 +380,7 @@ def test_every_slot_crosses_the_seam_as_mono_16_bit(theme_roots):
     }, "the true source rate still crosses the seam"
 
 
-def test_the_width_change_happens_after_the_gain_stage(theme_roots):
+def test_the_width_change_happens_after_the_gain_stage(theme_roots, library):
     """Quiet 24-bit detail must survive normalization, not be quantized away.
 
     The conversion is folded into the gain scale and applied once, at the end,
@@ -370,12 +399,63 @@ def test_the_width_change_happens_after_the_gain_stage(theme_roots):
         rate=48000,
     )
 
-    frames, _ = themes.load("quiet-24-bit")["button"]
+    frames, _ = library.load("quiet-24-bit")["button"]
     samples = _decode_pcm(frames, 2)
 
     assert samples == [-4396, 1465, 4396, -1465]
     assert abs(samples[0]) == pytest.approx(3 * abs(samples[1]), rel=1e-3)
     assert _rms_dbfs(samples, 2) == pytest.approx(-20.0, abs=0.01)
+
+
+def test_the_reference_level_is_a_constructor_choice(theme_roots):
+    bundled, user = theme_roots
+    _write_wav(user / "level" / "button.wav", [-1000, 1000] * 8)
+    louder = themes.SoundThemeLibrary(
+        bundled,
+        user,
+        reference_rms_dbfs=-20.0,
+    ).load("level")
+    quieter = themes.SoundThemeLibrary(
+        bundled,
+        user,
+        reference_rms_dbfs=-30.0,
+    ).load("level")
+
+    louder_rms = _rms_dbfs(_decode_pcm(louder["button"][0], 2), 2)
+    quieter_rms = _rms_dbfs(_decode_pcm(quieter["button"][0], 2), 2)
+    assert louder_rms - quieter_rms == pytest.approx(10.0, abs=0.01)
+
+
+def test_a_user_default_folder_still_merges_the_bundled_default(
+    theme_roots,
+    library,
+):
+    bundled, user = theme_roots
+    _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
+    _write_wav(bundled / "default" / "link.wav", [-2000, 2000])
+    _write_wav(bundled / "default" / "tab.wav", [-3000, 3000])
+    _write_wav(user / "default" / "button.wav", [-500, 0, 500])
+
+    bundled_default = themes.SoundThemeLibrary(bundled, None).load("default")
+    loaded = library.load("default")
+
+    assert set(loaded) == {"button", "link", "tab"}
+    assert loaded["button"] != bundled_default["button"]
+    assert loaded["link"] == bundled_default["link"]
+    assert loaded["tab"] == bundled_default["tab"]
+
+
+def test_merge_over_default_fills_only_missing_slots():
+    requested = {"button": (b"requested-button", 22050)}
+    default = {
+        "button": (b"default-button", 22050),
+        "link": (b"default-link", 48000),
+    }
+
+    assert themes._merge_over_default(requested, default, "sparse") == {
+        "button": requested["button"],
+        "link": default["link"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -443,13 +523,15 @@ def test_the_backoff_is_only_as_deep_as_it_has_to_be():
     frames, _ = processed["button"]
     values = struct.unpack(f"<{len(frames) // 2}h", frames)
     rms = math.sqrt(sum((v / themes._OUTPUT_FULL_SCALE) ** 2 for v in values) / len(values))
-    assert 20.0 * math.log10(rms) == pytest.approx(themes._REFERENCE_RMS_DBFS, abs=0.05)
+    assert 20.0 * math.log10(rms) == pytest.approx(themes.REFERENCE_RMS_DBFS, abs=0.05)
 
 
 def test_the_bundled_theme_does_not_clip_at_the_shipped_reference(caplog):
     """The #57 regression itself, against the real assets."""
     with caplog.at_level(logging.WARNING, logger=themes.__name__):
-        processed = themes.load("default")
+        processed = themes.SoundThemeLibrary(themes.BUNDLED_THEMES_DIR, None).load(
+            "default"
+        )
 
     assert processed, "the bundled theme should load"
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [
@@ -472,13 +554,17 @@ def test_processing_without_clipping_logs_no_warning(caplog):
     assert not caplog.records
 
 
-def test_sparse_fallback_logs_only_slots_actually_loaded(theme_roots, caplog):
+def test_sparse_fallback_logs_only_slots_actually_loaded(
+    theme_roots,
+    library,
+    caplog,
+):
     bundled, user = theme_roots
     _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
     _write_wav(user / "sparse" / "icon.wav", [-1000, 1000])
 
     with caplog.at_level(logging.INFO, logger=themes.__name__):
-        themes.load("sparse")
+        library.load("sparse")
 
     fallback_messages = [
         record.getMessage()
@@ -490,31 +576,20 @@ def test_sparse_fallback_logs_only_slots_actually_loaded(theme_roots, caplog):
     ]
 
 
-def test_user_themes_dir_round_trip(tmp_path):
-    user_dir = tmp_path / "sound-themes"
-
-    themes.set_user_themes_dir(str(user_dir))
-    assert themes.get_user_themes_dir() == user_dir
-
-    themes.set_user_themes_dir(None)
-    assert themes.get_user_themes_dir() is None
-
-
-def test_discover_and_load_work_without_configured_user_dir(tmp_path, monkeypatch):
+def test_discover_and_load_work_without_configured_user_dir(tmp_path):
     bundled = tmp_path / "bundled" / "sound-themes"
     _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
-    monkeypatch.setattr(themes, "_BUNDLED_THEMES_DIR", bundled)
+    library = themes.SoundThemeLibrary(bundled, None)
 
-    discovered = themes.discover()
-    loaded = themes.load("default")
+    discovered = library.discover()
+    loaded = library.load("default")
 
     assert [info.id for info in discovered] == ["default"]
     assert "button" in loaded
-    assert themes.get_user_themes_dir() is None
 
 
-def test_unknown_theme_returns_default(theme_roots):
+def test_unknown_theme_returns_default(theme_roots, library):
     bundled, _ = theme_roots
     _write_wav(bundled / "default" / "button.wav", [-1000, 1000])
 
-    assert themes.load("missing") == themes.load("default")
+    assert library.load("missing") == library.load("default")

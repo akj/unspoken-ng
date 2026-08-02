@@ -6,9 +6,10 @@
 This module is the only place that knows both NVDA and the addon. It owns four
 things and nothing else:
 
-- **Wiring.** The config spec and its one-shot migration, the user sound-theme
-  directory, the settings provider, the Sound Player, and -- because it is the
-  thing that attempted the player and caught the failure -- degraded mode.
+- **Wiring.** The config spec and its one-shot migration, the sound theme library
+  and the two directories it reads, the settings provider, the Sound Player,
+  and -- because it is the thing that attempted the player and caught the
+  failure -- degraded mode.
 - **Entry points.** Three object events, one speech-pipeline hook that places
   sounds into the speech stream, and one that only suppresses.
 - **The main-thread property reads.** `obj.role` and `obj.location`, once each,
@@ -424,6 +425,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # suppresses them (spec section 9.2).
         self._degraded = True
         self._player = SilentSoundPlayer()
+        self._themes = None
         self._previous_mouse_object = None
         self._original_properties_speech = None
         self._original_control_field_speech = None
@@ -440,13 +442,18 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         config.conf.spec["unspoken"] = settings.CONF_SPEC
         _migrate_legacy_config()
 
-        # 2. Where user sound themes live, before anything discovers or loads.
-        themes.set_user_themes_dir(_user_themes_dir())
+        # 2. The sound theme library, built with the two directories it reads.
+        #    Nothing can discover or load before it exists, which is the whole
+        #    of the ordering rule that used to be a comment (#66).
+        self._themes = themes.SoundThemeLibrary(
+            themes.BUNDLED_THEMES_DIR,
+            _user_themes_dir(),
+        )
 
         # 3. The settings provider, the samples, and the player. Construction
         #    is the only thing the player can fail; after it, failures stay
         #    below the seam.
-        sounds = themes.load(_conf("theme"))
+        sounds = self._themes.load(_conf("theme"))
         outcome = {
             "engine_ready": False,
             "device_open": False,
@@ -489,8 +496,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         # 5. The settings panel, and the live-preview hooks it calls.
         from . import addonGui
 
-        self._settings_panel = addonGui.SettingsPanel
-        gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(self._settings_panel)
+        self._settings_panel = addonGui.register(themes=self._themes)
         self._apply_theme = debounce.Debounce(
             THEME_PREVIEW_DEBOUNCE_MS, self._load_theme, wx.CallLater
         )
@@ -753,7 +759,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _load_theme(self, theme_id):
         """Decode and upload a sound theme. Debounced -- see `debounce.Debounce`."""
         try:
-            self._player.set_theme(themes.load(theme_id))
+            self._player.set_theme(self._themes.load(theme_id))
         except Exception:
             log.error(f"Unspoken: could not apply sound theme {theme_id!r}", exc_info=True)
 
@@ -836,10 +842,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             log.debugWarning("Unspoken: could not restore getControlFieldSpeech", exc_info=True)
 
         try:
+            from . import addonGui
+
             if self._settings_panel is not None:
-                gui.settingsDialogs.NVDASettingsDialog.categoryClasses.remove(
-                    self._settings_panel
-                )
+                addonGui.unregister(self._settings_panel)
         except Exception:
             pass
         self._settings_panel = None

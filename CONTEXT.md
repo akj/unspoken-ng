@@ -29,8 +29,12 @@ The one three-way answer for an NVDA event — *lead* (the role sound plays now,
 _Avoid_: play decision, should-play flag, playback mode, sound gating
 
 **Sound theme**:
-A swappable set of slot sounds, one active at a time. May be sparse — missing slots fall back to the bundled default theme. Audio-only: a folder of correctly-named wav files (plus an optional manifest); the addon owns the role→slot mapping.
+A swappable set of slot sounds, one active at a time. May be sparse — missing slots fall back to the bundled default theme through the Sound theme library. Audio-only: a folder of correctly-named wav files (plus an optional manifest); the addon owns the role→slot mapping.
 _Avoid_: sound pack, sound scheme, sound set
+
+**Sound theme library**:
+The object that knows where sound themes live and what they decode to (`themes.SoundThemeLibrary`), constructed with its two directories — the bundled one inside the addon and the user's, or none. It owns every "no usable theme" fallback: discovery always offers the bundled default, and loading fills a theme's missing slots from it. Loading returns nothing only when the bundled default is itself unusable, which is what degrades the session. Pure stdlib, above the Sound Player seam (ADR 0003, ADR 0005).
+_Avoid_: theme manager, theme registry, theme loader, the themes module
 
 **Slot**:
 A canonical sound identity (button, link, checkbox, …) that a sound theme provides a file for. The addon maps the ~40 NVDA control roles onto the ~15 slots.

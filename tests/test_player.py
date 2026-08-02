@@ -73,7 +73,7 @@ class AngrySettings:
 
 
 def tone(milliseconds=150, source_rate=44100, frequency=440.0, amplitude=500):
-    """Quiet mono 16-bit PCM, the shape `themes.load()` hands across the seam."""
+    """Quiet mono 16-bit PCM, as `SoundThemeLibrary.load()` hands it across."""
     count = int(source_rate * milliseconds / 1000.0)
     samples = [
         int(amplitude * math.sin(2.0 * math.pi * frequency * index / source_rate))

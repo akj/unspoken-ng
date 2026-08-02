@@ -1,10 +1,11 @@
 """Pick the theme reference loudness by ear (#40, spec section 7).
 
-`themes._REFERENCE_RMS_DBFS` is the level every sound theme is normalised to as
-a whole. It is currently -20.0 dBFS, marked provisional in the spec pending
-this session. The number matters because the 1.x chain's effective output was
-about -36.2 dBFS, so v2.0 ships role sounds roughly **+16 dB hotter than the
-addon they replace** -- a jump the user did not ask for, on headphones.
+`SoundThemeLibrary`'s `reference_rms_dbfs` constructor parameter is the level
+every sound theme is normalised to as a whole. It is currently -20.0 dBFS,
+marked provisional in the spec pending this session. The number matters
+because the 1.x chain's effective output was about -36.2 dBFS, so v2.0 ships
+role sounds roughly **+16 dB hotter than the addon they replace** -- a jump the
+user did not ask for, on headphones.
 
 People judge *relative* loudness well and *absolute* loudness badly, so this
 does not ask "is -20 right?". It plays the real theme through the real Sound
@@ -106,12 +107,10 @@ class UnitySettings:
 
 def theme_at(themes, theme_id: str, level_dbfs: float) -> dict:
     """Load `theme_id` normalised to `level_dbfs` instead of the shipped value."""
-    original = themes._REFERENCE_RMS_DBFS
-    themes._REFERENCE_RMS_DBFS = level_dbfs
-    try:
-        return themes.load(theme_id)
-    finally:
-        themes._REFERENCE_RMS_DBFS = original
+    library = themes.SoundThemeLibrary(
+        themes.BUNDLED_THEMES_DIR, None, reference_rms_dbfs=level_dbfs
+    )
+    return library.load(theme_id)
 
 
 def play_sequence(sound_player, sounds, slots, gap_s: float) -> None:
@@ -186,7 +185,7 @@ def report(wins: dict[float, int], judged: int) -> None:
     winner = max(wins.items(), key=lambda kv: kv[1])
     print(
         f"\nMost preferred: {winner[0]:+.1f} dBFS. If that is not "
-        f"{-20.0:+.1f}, change `_REFERENCE_RMS_DBFS` in `themes.py`,"
+        f"{-20.0:+.1f}, change the `reference_rms_dbfs` constructor parameter,"
     )
     print("and record the number and this session on issue #40.")
 

@@ -105,9 +105,9 @@ class SoundPlayer(Protocol):
         **Frames are mono 16-bit little-endian PCM.** That width is part of the
         seam, not an implementation detail leaking through it: core OpenAL has
         no 24-bit buffer format, so frames of any other width are uploaded as
-        noise and no error is raised. `themes.load()` conforms every asset to
-        this width; the rate is whatever the file really was, and OpenAL
-        resamples per source.
+        noise and no error is raised. `SoundThemeLibrary.load()` conforms every
+        asset to this width; the rate is whatever the file really was, and
+        OpenAL resamples per source.
         """
         ...
 

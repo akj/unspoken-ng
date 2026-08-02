@@ -10,8 +10,10 @@ close()
 ```
 
 Above it sit `spatial` (screen rects in, listener-relative unit vector out — pure, no NVDA and no
-OpenAL), `themes` (discovery, decode, mono downmix, per-theme RMS gain — pure stdlib, runs
-off-NVDA), a `roles` table mapping the ~40 NVDA control roles onto the ~15 slots, and
+OpenAL), `themes` (a library constructed with the two directories it reads, owning every "no
+usable theme" fallback as refined by [ADR 0005](0005-the-sound-theme-library-is-constructed-with-its-directories.md),
+plus decode, mono downmix and per-theme RMS gain — pure stdlib, runs off-NVDA), a `roles` table
+mapping the ~40 NVDA control roles onto the ~15 slots, and
 `GlobalPlugin`, which reads `obj.role` and `obj.location` on the main thread and wires the rest
 together. Below it is one module — the Sound Player — whose implementation *is* the OpenAL Soft
 adapter: DLL load, `ALSOFT_CONF`, the output device and its reopen worker, the source pool and
