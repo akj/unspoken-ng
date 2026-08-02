@@ -24,6 +24,10 @@ _Avoid_: coordinates, location, panning, 3D vector
 Time from the NVDA event (focus, navigation, mouse) to the first audible sample of the role sound. The pipeline's primary quality bar wherever the sound answers the user's movement — object events and reading-path fields the navigation lands inside. For controls speech merely traverses, the bar is speech-sync instead: the sound fires when speech reaches the control (ADR 0002), and the budget governs dispatch, not audibility.
 _Avoid_: lag, delay, response time
 
+**Playback verdict**:
+The one three-way answer for an NVDA event — *lead* (the role sound plays now, ahead of the speech announcing the control), *ride* (the sound goes into the field's speech sequence and fires when the synth reaches it), or *silent*. Decided in one place, `playback.decide`, from event facts and a config snapshot; the role-suppression predicate sits beside it, and `GlobalPlugin`'s call sites gather inputs and obey (ADR 0004). Lead-versus-ride semantics are ADR 0002's: sounds announcing where the user just arrived lead speech; sounds announcing content speech is traversing ride it.
+_Avoid_: play decision, should-play flag, playback mode, sound gating
+
 **Sound theme**:
 A swappable set of slot sounds, one active at a time. May be sparse — missing slots fall back to the bundled default theme. Audio-only: a folder of correctly-named wav files (plus an optional manifest); the addon owns the role→slot mapping.
 _Avoid_: sound pack, sound scheme, sound set
@@ -37,5 +41,5 @@ NVDA's lowering of other applications' audio while the screen reader plays. **Th
 _Avoid_: attenuation, audio focus
 
 **Degraded mode**:
-The addon running speech-only, because it cannot produce a role sound at all. It is decided once, at the end of construction, by the outcome predicate `wiring.can_produce_role_sound` over the three things that must be true to put a sound in the air: the engine started, a device opened, and the theme decoded to at least one slot. There is no fallback output path below the seam (ADR 0001), so anything that fails later stays below it. In degraded mode the silent adapter sits under the seam, the addon suppresses nothing, and NVDA speaks control roles as it would without the addon. The user's saved role-announcement setting is left untouched, so a repaired install returns to sounds with nothing to re-set. The user is told once, on a delay, so the message does not collide with NVDA's startup announcement.
+The addon running speech-only, because it cannot produce a role sound at all. It is decided once, at the end of construction, by the outcome predicate `playback.can_produce_role_sound` over the three things that must be true to put a sound in the air: the engine started, a device opened, and the theme decoded to at least one slot. There is no fallback output path below the seam (ADR 0001), so anything that fails later stays below it. In degraded mode the silent adapter sits under the seam, the addon suppresses nothing, and NVDA speaks control roles as it would without the addon. The user's saved role-announcement setting is left untouched, so a repaired install returns to sounds with nothing to re-set. The user is told once, on a delay, so the message does not collide with NVDA's startup announcement.
 _Avoid_: fallback mode, safe mode, silent mode, failure mode

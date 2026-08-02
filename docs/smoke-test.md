@@ -195,7 +195,7 @@ Set **Role announcement** to each value in turn and Tab through a dialog.
 - Fail: any combination where the role is neither spoken nor sounded. That is
   the bug this rebuild retires; it must not be reachable from the panel.
 
-  One known exception, accepted and recorded in `wiring.py` beside
+  One known exception, accepted and recorded in `playback.py` beside
   `PLAY_FIELD_TYPES`: a **single-line** editable field that NVDA announces
   through `speakWithinForLine` is suppressed with no sound. It did not occur
   anywhere in the #32 measurement run. If you hit it, note it — it is a known,
