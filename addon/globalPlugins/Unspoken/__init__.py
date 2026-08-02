@@ -61,7 +61,7 @@ import wx
 from logHandler import log
 from speech.commands import CallbackCommand
 
-from . import debounce, migration, playback, roles, spatial, themes, volume
+from . import debounce, migration, playback, roles, settings, spatial, themes, volume
 from .player import NoAudioEndpointError, OpenALSoundPlayer, SilentSoundPlayer
 
 
@@ -73,15 +73,6 @@ addonHandler.initTranslation()
 #: `config.conf["unspoken"]` section name the migration inherits.
 USER_DATA_DIR_NAME = "unspoken-ng"
 SOUND_THEMES_DIR_NAME = "sound-themes"
-
-#: Spec section 8's defaults, repeated here only as the answer when a key
-#: cannot be read at all. The registered spec is the real source.
-CONFIG_DEFAULTS = {
-    "theme": "default",
-    "roleAnnouncement": "sounds",
-    "reverb": "smallRoom",
-    "silenceDuringSayAll": False,
-}
 
 #: How long a burst of live-preview keypresses is collapsed over before the
 #: sound theme is decoded. Long enough that holding an arrow key through a
@@ -109,7 +100,7 @@ def _conf(key):
     try:
         return config.conf["unspoken"][key]
     except Exception:
-        return CONFIG_DEFAULTS[key]
+        return settings.DEFAULTS[key]
 
 
 def _playback_config():
@@ -446,7 +437,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         #    designed home -- and the migration runs immediately after, before
         #    anything has read a key and warmed the aggregated section's cache
         #    with a value the migration is about to change.
-        config.conf.spec["unspoken"] = migration.CONF_SPEC
+        config.conf.spec["unspoken"] = settings.CONF_SPEC
         _migrate_legacy_config()
 
         # 2. Where user sound themes live, before anything discovers or loads.

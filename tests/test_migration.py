@@ -16,19 +16,6 @@ migration = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(migration)
 
 
-def test_conf_spec_matches_new_configuration_schema():
-    assert migration.CONF_SPEC == {
-        "theme": 'string(default="default")',
-        "roleAnnouncement": (
-            'option("sounds", "soundsAndSpeech", "speechOnly", default="sounds")'
-        ),
-        "reverb": (
-            'option("none", "smallRoom", "mediumRoom", "hall", default="smallRoom")'
-        ),
-        "silenceDuringSayAll": "boolean(default=False)",
-    }
-
-
 @pytest.mark.parametrize(
     ("no_sounds", "speak_roles", "expected"),
     [

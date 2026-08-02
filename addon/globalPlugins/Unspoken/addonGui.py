@@ -7,6 +7,8 @@ import config
 import gui
 import wx
 
+from . import settings
+
 
 addonHandler.initTranslation()
 
@@ -33,34 +35,40 @@ apply_theme: Callable[[str], None] = _apply_theme_noop
 apply_reverb: Callable[[str], None] = _apply_reverb_noop
 
 
-ROLE_ANNOUNCEMENT_CHOICES = (
-	# Translators: A role announcement mode: roles are announced by sounds instead of speech.
-	("sounds", _("Sounds")),
-	# Translators: A role announcement mode: roles are announced by sounds and spoken as well.
-	("soundsAndSpeech", _("Sounds and speech")),
-	# Translators: A role announcement mode: roles are spoken and no sounds play.
-	("speechOnly", _("Speech only")),
+def _labelled(values, labels):
+	"""Pair each declared value with its label; a mismatch is drift, refused loudly."""
+	if set(labels) != set(values):
+		raise ValueError(f"labels {sorted(labels)} do not cover values {sorted(values)}")
+	return tuple((value, labels[value]) for value in values)
+
+
+ROLE_ANNOUNCEMENT_CHOICES = _labelled(
+	settings.ROLE_ANNOUNCEMENT_VALUES,
+	{
+		# Translators: A role announcement mode: roles are announced by sounds instead of speech.
+		"sounds": _("Sounds"),
+		# Translators: A role announcement mode: roles are announced by sounds and spoken as well.
+		"soundsAndSpeech": _("Sounds and speech"),
+		# Translators: A role announcement mode: roles are spoken and no sounds play.
+		"speechOnly": _("Speech only"),
+	},
 )
 
-REVERB_CHOICES = (
-	# Translators: A reverb preset: role sounds play with no reverb.
-	("none", _("None")),
-	# Translators: A reverb preset: role sounds play as if in a small room.
-	("smallRoom", _("Small room")),
-	# Translators: A reverb preset: role sounds play as if in a medium-sized room.
-	("mediumRoom", _("Medium room")),
-	# Translators: A reverb preset: role sounds play as if in a hall.
-	("hall", _("Hall")),
+REVERB_CHOICES = _labelled(
+	settings.REVERB_PRESETS,
+	{
+		# Translators: A reverb preset: role sounds play with no reverb.
+		"none": _("None"),
+		# Translators: A reverb preset: role sounds play as if in a small room.
+		"smallRoom": _("Small room"),
+		# Translators: A reverb preset: role sounds play as if in a medium-sized room.
+		"mediumRoom": _("Medium room"),
+		# Translators: A reverb preset: role sounds play as if in a hall.
+		"hall": _("Hall"),
+	},
 )
 
-_CONFIG_KEYS = (
-	"theme",
-	"roleAnnouncement",
-	"reverb",
-	"silenceDuringSayAll",
-)
-
-_DEFAULT_THEME_ID = "default"
+_DEFAULT_THEME_ID = settings.DEFAULTS["theme"]
 
 
 def build_theme_choices(discovered_themes):
@@ -100,31 +108,33 @@ def theme_id_for_index(theme_ids, index):
 
 
 def role_announcement_index_for(selected_value):
-	values = [value for value, label in ROLE_ANNOUNCEMENT_CHOICES]
+	values = settings.ROLE_ANNOUNCEMENT_VALUES
 	try:
 		return values.index(selected_value)
 	except ValueError:
-		return 0
+		return values.index(settings.DEFAULTS["roleAnnouncement"])
 
 
 def role_announcement_value_for_index(index):
-	if 0 <= index < len(ROLE_ANNOUNCEMENT_CHOICES):
-		return ROLE_ANNOUNCEMENT_CHOICES[index][0]
-	return "sounds"
+	values = settings.ROLE_ANNOUNCEMENT_VALUES
+	if 0 <= index < len(values):
+		return values[index]
+	return settings.DEFAULTS["roleAnnouncement"]
 
 
 def reverb_index_for(selected_value):
-	values = [value for value, label in REVERB_CHOICES]
+	values = settings.REVERB_PRESETS
 	try:
 		return values.index(selected_value)
 	except ValueError:
-		return 1
+		return values.index(settings.DEFAULTS["reverb"])
 
 
 def reverb_value_for_index(index):
-	if 0 <= index < len(REVERB_CHOICES):
-		return REVERB_CHOICES[index][0]
-	return "smallRoom"
+	values = settings.REVERB_PRESETS
+	if 0 <= index < len(values):
+		return values[index]
+	return settings.DEFAULTS["reverb"]
 
 
 class SettingsPanel(gui.settingsDialogs.SettingsPanel):
@@ -245,7 +255,7 @@ class SettingsPanel(gui.settingsDialogs.SettingsPanel):
 			section = config.conf["unspoken"]
 		except KeyError:
 			return snapshot
-		for key in _CONFIG_KEYS:
+		for key in settings.CONFIG_KEYS:
 			try:
 				snapshot[key] = section[key]
 			except KeyError:
