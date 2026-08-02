@@ -17,6 +17,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import settings as addon_settings
+
 
 UNSPOKEN_DIR = (
 	Path(__file__).parents[1]
@@ -29,12 +31,7 @@ _package_counter = itertools.count()
 
 
 def _default_conf():
-	return {
-		"theme": "default",
-		"roleAnnouncement": "sounds",
-		"reverb": "smallRoom",
-		"silenceDuringSayAll": False,
-	}
+	return dict(addon_settings.DEFAULTS)
 
 
 class _Conf(dict):
@@ -293,6 +290,11 @@ def test_reverb_index_for(addon_gui, value, expected_index):
 )
 def test_reverb_value_for_index(addon_gui, index, expected_value):
 	assert addon_gui.reverb_value_for_index(index) == expected_value
+
+
+def test_panel_choices_offer_exactly_the_declared_values(addon_gui):
+	assert tuple(v for v, _ in addon_gui.ROLE_ANNOUNCEMENT_CHOICES) == addon_settings.ROLE_ANNOUNCEMENT_VALUES
+	assert tuple(v for v, _ in addon_gui.REVERB_CHOICES) == addon_settings.REVERB_PRESETS
 
 
 # --- the panel ------------------------------------------------------------

@@ -1,11 +1,4 @@
-"""Configuration migration for legacy Unspoken settings."""
-
-CONF_SPEC = {
-    "theme": 'string(default="default")',
-    "roleAnnouncement": 'option("sounds", "soundsAndSpeech", "speechOnly", default="sounds")',
-    "reverb": 'option("none", "smallRoom", "mediumRoom", "hall", default="smallRoom")',
-    "silenceDuringSayAll": "boolean(default=False)",
-}
+"""Rewrite legacy Unspoken settings onto the surface declared in settings.py."""
 
 _OLD_KEYS = (
     "sayAll",

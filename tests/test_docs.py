@@ -29,7 +29,7 @@ ADR_DIR = REPO / "docs" / "adr"
 # --- the four settings -----------------------------------------------------
 
 
-def test_readme_documents_every_setting_in_the_spec(migration):
+def test_readme_documents_every_setting_in_the_spec(settings):
     """Every key in CONF_SPEC has a bullet in the guide, under its panel label."""
     labels = {
         "theme": "Sound theme",
@@ -37,32 +37,36 @@ def test_readme_documents_every_setting_in_the_spec(migration):
         "reverb": "Reverb",
         "silenceDuringSayAll": "Silence role sounds during say all",
     }
-    assert set(labels) == set(migration.CONF_SPEC), (
-        "CONF_SPEC changed; update this table and the README bullets together"
+    assert set(labels) == set(settings.CONF_SPEC), (
+        "settings.CONF_SPEC changed; update this table and the README bullets together"
     )
     for key, label in labels.items():
         assert f"**{label}**" in README, f"README has no bullet for {key!r} ({label})"
 
 
-def test_readme_lists_the_real_reverb_presets(migration, player):
+def test_readme_lists_the_real_reverb_presets(settings, player):
     """The guide names the presets; the player defines them."""
-    documented = {"None", "Small room", "Medium room", "Hall"}
-    spec_values = set(
-        re.findall(r'"([^"]+)"', migration.CONF_SPEC["reverb"].split("default=")[0])
-    )
-    assert spec_values == set(player.REVERB_PRESETS)
-    for label in documented:
+    documented = {
+        "none": "None",
+        "smallRoom": "Small room",
+        "mediumRoom": "Medium room",
+        "hall": "Hall",
+    }
+    assert set(documented) == set(settings.REVERB_PRESETS)
+    assert set(player.REVERB_PRESETS) == set(settings.REVERB_PRESETS)
+    for label in documented.values():
         assert f"*{label}*" in README, f"README does not name the {label!r} preset"
 
 
-def test_readme_role_announcement_choices_match_the_spec(migration):
-    spec_values = set(
-        re.findall(
-            r'"([^"]+)"',
-            migration.CONF_SPEC["roleAnnouncement"].split("default=")[0],
-        )
-    )
-    assert spec_values == {"sounds", "soundsAndSpeech", "speechOnly"}
+def test_readme_role_announcement_choices_match_the_spec(settings):
+    documented = {
+        "sounds": "Sounds",
+        "soundsAndSpeech": "Sounds and speech",
+        "speechOnly": "Speech only",
+    }
+    assert set(documented) == set(settings.ROLE_ANNOUNCEMENT_VALUES)
+    for label in documented.values():
+        assert f"*{label}*" in README, f"README does not name the {label!r} choice"
 
 
 # --- sound themes ----------------------------------------------------------
@@ -160,8 +164,8 @@ def test_context_entries_all_carry_an_avoid_line():
 
 
 @pytest.fixture
-def migration():
-    return _addon_module("migration")
+def settings():
+    return _addon_module("settings")
 
 
 @pytest.fixture
