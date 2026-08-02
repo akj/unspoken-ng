@@ -31,6 +31,7 @@ REQUIRED_FILES = {
     f"{MODULE_PREFIX}migration.py",
     f"{MODULE_PREFIX}playback.py",
     f"{MODULE_PREFIX}player.py",
+    f"{MODULE_PREFIX}preview.py",
     f"{MODULE_PREFIX}roles.py",
     f"{MODULE_PREFIX}spatial.py",
     f"{MODULE_PREFIX}themes.py",
