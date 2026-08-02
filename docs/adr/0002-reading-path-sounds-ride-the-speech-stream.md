@@ -14,8 +14,9 @@ The split needs no utterance tracking, because `fieldType` already encodes it:
 head of an utterance that — under `CARET` and `QUICKNAV`, which cancel current speech — begins
 now. `start_relative` is a field speech traverses mid-utterance. Under `SAYALL` even the
 utterance start sits behind the read-ahead queue, so there everything rides. The predicate is
-`wiring.should_ride_speech`, table-tested against the #32 dataset: of its 113 plays, 84 lead
-and 29 ride.
+the lead/ride split inside `playback.decide` (originally `wiring.should_ride_speech`; relocated
+verbatim by [ADR 0004](0004-the-playback-verdict-is-one-decide-call.md)), table-tested against
+the #32 dataset: of its 113 plays, 84 lead and 29 ride.
 
 The trigger was the first 2.0 smoke run (#52): a link's sound played seconds before say-all's
 speech reached the link, and a table row with several controls fired every sound in one burst.

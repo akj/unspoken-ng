@@ -27,16 +27,21 @@ REQUIRED_FILES = {
     # crash on the first NVDA start after release, not a test failure.
     f"{MODULE_PREFIX}__init__.py",
     f"{MODULE_PREFIX}addonGui.py",
+    f"{MODULE_PREFIX}debounce.py",
     f"{MODULE_PREFIX}migration.py",
+    f"{MODULE_PREFIX}playback.py",
     f"{MODULE_PREFIX}player.py",
     f"{MODULE_PREFIX}roles.py",
     f"{MODULE_PREFIX}spatial.py",
     f"{MODULE_PREFIX}themes.py",
-    f"{MODULE_PREFIX}wiring.py",
+    f"{MODULE_PREFIX}volume.py",
 }
-#: Retired by #38. Shipping it again would mean a stale tree, not a new file.
+#: Retired modules. Shipping one again would mean a stale tree, not a new
+#: file: openal_audio.py went with #38, wiring.py dissolved into playback.py,
+#: debounce.py and volume.py with #64.
 FORBIDDEN_FILES = {
     f"{MODULE_PREFIX}openal_audio.py",
+    f"{MODULE_PREFIX}wiring.py",
 }
 
 

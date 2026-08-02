@@ -15,9 +15,10 @@ things and nothing else:
   from the object the event handed us.
 - **Lifetime.** Everything patched here is unpatched in `terminate`.
 
-Everything it *decides* lives in `wiring.py`, which imports no NVDA and is
-table-tested off NVDA. Everything below the seam lives in `player.py`, which is
-the only module that knows OpenAL exists.
+Everything it *decides* lives in `playback.py` -- the playback verdict, one
+decide call and the suppression predicate beside it (ADR 0004) -- which
+imports no NVDA and is table-tested off NVDA. Everything below the seam lives
+in `player.py`, which is the only module that knows OpenAL exists.
 
 The latency rules this module has to keep (spec section 2), because they are
 invisible in the code that keeps them:
@@ -35,7 +36,7 @@ invisible in the code that keeps them:
   so the sound leads speech like the object events' do -- while traversed
   fields and everything under say-all return a `CallbackCommand` in the
   field's speech sequence, fired by the speech manager on the main thread
-  when the synth reaches it. The split is `wiring.should_ride_speech`; #31's
+  when the synth reaches it. The split is inside `playback.decide`; #31's
   rule holds either way -- the synchronous call is the hook or the manager's
   index handling. Position is always read in the hook, where the property
   reads are legal and the field is current.
@@ -60,7 +61,7 @@ import wx
 from logHandler import log
 from speech.commands import CallbackCommand
 
-from . import migration, roles, spatial, themes, wiring
+from . import debounce, migration, playback, roles, spatial, themes, volume
 from .player import NoAudioEndpointError, OpenALSoundPlayer, SilentSoundPlayer
 
 
@@ -111,6 +112,19 @@ def _conf(key):
         return CONFIG_DEFAULTS[key]
 
 
+def _playback_config():
+    """The `playback.Config` snapshot the verdict reads, taken per call.
+
+    Four ConfigObj dict lookups against already-parsed sections (two per
+    `_conf`), taken fresh on every decision so a panel change applies to the
+    next sound with no cache to invalidate.
+    """
+    return playback.Config(
+        role_announcement=_conf("roleAnnouncement"),
+        silence_during_say_all=_conf("silenceDuringSayAll"),
+    )
+
+
 class _NVDASettingsProvider:
     """The settings the Sound Player is allowed to know about (spec section 4.4).
 
@@ -119,7 +133,7 @@ class _NVDASettingsProvider:
     block. Counted in ConfigObj subscripts: `output_device` is 2
     (`conf["audio"]["outputDevice"]`); `volume` is 3, or **7** with "sound
     volume follows voice" on, plus the arithmetic in
-    `wiring.effective_volume`. Every one of them is a dict lookup against an
+    `volume.effective_volume`. Every one of them is a dict lookup against an
     already-parsed section.
 
     `volume` additionally reads the synth's volume when the user has turned on
@@ -147,7 +161,7 @@ class _NVDASettingsProvider:
     def volume(self):
         audio = config.conf["audio"]
         follows_voice = audio["soundVolumeFollowsVoice"]
-        return wiring.effective_volume(
+        return volume.effective_volume(
             audio["soundVolume"],
             follows_voice,
             _synth_volume() if follows_voice else None,
@@ -187,12 +201,14 @@ def _synth_reports_indexes():
     reaching the index the manager converted it to; a synth that never reports
     leaves it waiting forever -- NVDA has no timeout for it (say-all is just as
     broken on such a synth, for the same reason). Every in-tree synth reports
-    indexes; this check exists for out-of-tree ones, and failing it falls back
-    to playing at build time.
+    indexes; this check exists for out-of-tree ones, and failing it makes
+    `playback.decide` fall back to a leading play.
 
-    Cost on the reading path: two attribute reads and a frozenset membership.
-    For a synth under the 32-bit bridge, `supportedNotifications` is cached on
-    the proxy, so no pipe round trip hides here.
+    Cost: two attribute reads and a frozenset membership, paid on every
+    reading-path call now that it is gathered up front as one of the
+    verdict's inputs rather than lazily behind the old ride predicate. For a
+    synth under the 32-bit bridge, `supportedNotifications` is cached on the
+    proxy, so no pipe round trip hides here.
     """
     try:
         synth = synthDriverHandler.getSynth()
@@ -465,13 +481,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         #    race the player's worker. Mid-session device trouble never
         #    escalates to speech-only -- it drops plays behind the player's own
         #    boolean and recovers on the next device event.
-        self._degraded = not wiring.can_produce_role_sound(outcome)
+        self._degraded = not playback.can_produce_role_sound(outcome)
         if self._degraded:
             if player is not None:
                 player.close()
             log.error(
                 f"Unspoken: running speech-only this session -- "
-                f"{wiring.degraded_cause(outcome)}."
+                f"{playback.degraded_cause(outcome)}."
             )
             self._announce_degraded()
         else:
@@ -484,7 +500,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         self._settings_panel = addonGui.SettingsPanel
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(self._settings_panel)
-        self._apply_theme = wiring.Debounce(
+        self._apply_theme = debounce.Debounce(
             THEME_PREVIEW_DEBOUNCE_MS, self._load_theme, wx.CallLater
         )
         addonGui.apply_theme = self._apply_theme
@@ -566,14 +582,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         the handed object is the right one on the Tab path, and that the
         deleted branch was median 58.9 degrees wrong as well as ~15 ms slow.
 
-        A missing rect falls back to the screen centre rather than dropping the
-        sound -- position degrades, the sound does not.
+        The verdict is `playback.decide`, the same call every play decision
+        goes through; an object event's sound only ever leads or stays
+        silent. A missing rect falls back to the screen centre rather than
+        dropping the sound -- position degrades, the sound does not.
         """
         try:
-            if _conf("roleAnnouncement") == "speechOnly":
-                return
             slot = roles.slot_for(obj.role)
-            if slot is None:
+            verdict = playback.decide(playback.ObjectEvent(slot=slot), _playback_config())
+            if verdict is playback.SILENT:
                 return
             location = obj.location
             desktop_rect = _desktop_rect()
@@ -630,42 +647,42 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         return getControlFieldSpeech
 
     def _control_field_sound(self, info, attrs, fieldType, reason):
-        """Decide, place, wrap. The decision is `wiring.should_play_control_field`.
+        """Gather, decide, obey. The decision is `playback.decide`.
 
-        Everything handed to the predicate is a plain value, so the whole
-        condition is table-tested off NVDA against #32's measured records
-        (`tests/test_wiring.py`). Nothing here re-implements any part of it.
+        Everything handed to the verdict is a plain value, so the whole
+        decision -- play, lead, ride, silent -- is table-tested off NVDA
+        against #32's measured records (`tests/test_playback.py`). Nothing
+        here re-implements any clause of it, and there is no ordering for
+        this caller to get wrong: one call, one verdict.
 
         The position is read here, at build time -- the main thread, where the
-        property reads are legal and the field's identifiers are at hand. Then
-        `wiring.should_ride_speech` splits the timing: the field the
-        navigation just landed inside plays now, leading speech the way the
-        object events do, and everything else goes back to the hook as a
-        `CallbackCommand` closing over `(slot, position)`; the speech manager
-        fires it, on this same thread, when the synth reaches the field. An
-        index from a cancelled utterance is dropped by the manager, so
-        interrupting speech drops the sounds of everything never spoken --
-        while voices already in the air ring out (#10 d5).
+        property reads are legal and the field's identifiers are at hand. A
+        LEAD verdict plays now: the field the navigation just landed inside,
+        leading speech the way the object events do (ADR 0002), or any play
+        on a synth that never reports indexes. A RIDE verdict goes back to
+        the hook as a `CallbackCommand` closing over `(slot, position)`; the
+        speech manager fires it, on this same thread, when the synth reaches
+        the field. An index from a cancelled utterance is dropped by the
+        manager, so interrupting speech drops the sounds of everything never
+        spoken -- while voices already in the air ring out (#10 d5).
 
         `self._player` is resolved at fire time deliberately: a callback that
         outlives `terminate` finds the `SilentSoundPlayer` and no-ops.
         """
-        reason_name = getattr(reason, "name", None)
         slot = roles.slot_for(attrs.get("role"))
-        if not wiring.should_play_control_field(
-            reason_name,
-            fieldType,
-            slot,
-            _conf("silenceDuringSayAll"),
-        ):
-            return None
-        if _conf("roleAnnouncement") == "speechOnly":
+        verdict = playback.decide(
+            playback.ControlField(
+                reason=getattr(reason, "name", None),
+                field_type=fieldType,
+                slot=slot,
+                synth_reports_indexes=_synth_reports_indexes(),
+            ),
+            _playback_config(),
+        )
+        if verdict is playback.SILENT:
             return None
         position = self._reading_position(info, attrs)
-        if not wiring.should_ride_speech(reason_name, fieldType) or not _synth_reports_indexes():
-            # Leads: the utterance announcing this field starts now. Or the
-            # fallback: a synth that never reports indexes would leave the
-            # callback waiting forever, so play at build time, bursts and all.
+        if verdict is playback.LEAD:
             self._player.play(slot, position)
             return None
 
@@ -711,8 +728,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     def _make_properties_speech_hook(self, original):
         """Patch `speech.speech.getPropertiesSpeech` -- suppression, and only that.
 
-        This hook never plays. It is gated on three things: not degraded, the
-        role maps to a slot, and role announcement is "sounds".
+        This hook never plays. Its one question is
+        `playback.should_suppress_spoken_role`; this site only gathers the
+        inputs -- the slot, the config snapshot, the session's degraded flag
+        -- and obeys.
 
         The original is closed over rather than read from `self` at call time,
         which matters for teardown: if another add-on patches over us and later
@@ -728,15 +747,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         plugin = self
 
         def getPropertiesSpeech(*args, **kwargs):
-            if not plugin._degraded:
-                role = kwargs.get("role")
-                if (
-                    role is not None
-                    and roles.slot_for(role) is not None
-                    and _conf("roleAnnouncement") == "sounds"
-                ):
-                    # NVDA does not announce a role handed to it as `_role`.
-                    kwargs["_role"] = kwargs.pop("role")
+            role = kwargs.get("role")
+            if role is not None and playback.should_suppress_spoken_role(
+                roles.slot_for(role), _playback_config(), degraded=plugin._degraded
+            ):
+                # NVDA does not announce a role handed to it as `_role`.
+                kwargs["_role"] = kwargs.pop("role")
             return original(*args, **kwargs)
 
         return getPropertiesSpeech
@@ -744,7 +760,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
     # ------------------------------------------------------- settings panel
 
     def _load_theme(self, theme_id):
-        """Decode and upload a sound theme. Debounced -- see `wiring.Debounce`."""
+        """Decode and upload a sound theme. Debounced -- see `debounce.Debounce`."""
         try:
             self._player.set_theme(themes.load(theme_id))
         except Exception:
